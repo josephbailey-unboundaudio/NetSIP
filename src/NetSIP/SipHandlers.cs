@@ -218,7 +218,9 @@ public sealed class SipResponseWriter
     /// <param name="request">The request whose transaction headers are preserved.</param>
     /// <param name="realm">A printable ASCII realm without quote or backslash.</param>
     /// <param name="nonce">A printable ASCII server nonce.</param>
-    /// <param name="algorithms">The algorithms to advertise, in secure preference order.</param>
+    /// <param name="algorithms">
+    /// Flags selecting the algorithms to advertise. SHA-256 is emitted before MD5.
+    /// </param>
     /// <param name="stale">Whether the prior nonce was valid but expired.</param>
     /// <returns>
     /// <see langword="true"/> when the challenge was written; otherwise,
