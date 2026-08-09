@@ -481,10 +481,11 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
 
     private bool RequiresAuthentication(ReadOnlySpan<byte> method)
     {
-        return (_protectedMethods & SipDigestProtectedMethods.Invite) != 0 &&
-                Ascii.EqualsIgnoreCase(method, "INVITE"u8) ||
-            (_protectedMethods & SipDigestProtectedMethods.Register) != 0 &&
-                Ascii.EqualsIgnoreCase(method, "REGISTER"u8);
+        return
+            ((_protectedMethods & SipDigestProtectedMethods.Invite) != 0 &&
+                Ascii.EqualsIgnoreCase(method, "INVITE"u8)) ||
+            ((_protectedMethods & SipDigestProtectedMethods.Register) != 0 &&
+                Ascii.EqualsIgnoreCase(method, "REGISTER"u8));
     }
 
     private bool TryGetAlgorithm(
