@@ -9,7 +9,7 @@ dependency-free test executable, and a deterministic allocation harness.
 | Project | Purpose |
 | --- | --- |
 | `src\NetSIP` | TLS server, streaming framer, parser, handlers, response writer, and certificate loader |
-| `samples\NetSIP.Sample` | Configuration-driven OPTIONS/REGISTER server |
+| `samples\NetSIP.Sample` | Configuration-driven OPTIONS/REGISTER/INVITE server |
 | `tests\NetSIP.Tests` | Unit and real-network TLS integration tests |
 | `benchmarks\NetSIP.Benchmarks` | Warmed parser throughput and allocation measurement |
 
@@ -93,7 +93,19 @@ await using var server = new SipTlsServer(
             MaxMessagesPerConnection = 10_000
         }
     },
-    new DefaultSipRequestHandler(new RegisterSipRequestHandler()));
+    new DefaultSipRequestHandler(
+        new RegisterSipRequestHandler(),
+        new SipInviteRequestHandler(
+            new PrefixSipDialPlanProcessor(
+                [
+                    new SipDialPlanRule(
+                        "1",
+                        SipDialPlanResult.Redirect(
+                            "sips:gateway@example.com"u8.ToArray()))
+                ],
+                SipDialPlanResult.Reject(
+                    404,
+                    "Not Found"u8.ToArray())))));
 
 await server.StartAsync();
 ```
@@ -120,6 +132,18 @@ state and is outside the zero-allocation parser guarantee.
 REGISTER is opt-in because the built-in handler does not authenticate requests.
 Configure `SipRegisterHandlerOptions` conservatively and place authentication
 and authorization ahead of it before exposing a registrar to untrusted peers.
+
+INVITE is also opt-in. `SipInviteRequestHandler` validates CSeq, Contact, and
+Max-Forwards before calling an `ISipDialPlanProcessor`. A
+`PrefixSipDialPlanProcessor` applies longest-prefix matching to the request-URI
+user and returns an owned `SipDialPlanResult`: `Answer` (200 with Contact and
+optional body), `Redirect` (3xx with Contact), or `Reject` (4xx-6xx).
+Custom processors may perform asynchronous routing lookups while the borrowed
+`SipInviteContext` remains valid only until `ProcessAsync` completes.
+
+The sample enables a catch-all INVITE dialplan. Set
+`NETSIP_INVITE_REDIRECT` to a safe SIP/SIPS contact URI to redirect calls;
+without it, INVITE receives `404 Not Found`.
 
 Custom handlers implement `ISipRequestHandler`. Response construction is
 synchronous and span-based; the server flushes after the handler completes:
@@ -174,7 +198,7 @@ connection is closed.
 
 NetSIP is a transport/parser with a process-local registrar, not a complete SIP
 proxy or distributed registrar. It does not provide digest authentication,
-authorization, transaction/dialog storage, durable/shared location storage,
+authorization, transaction/dialog or media-session storage, durable/shared location storage,
 rate limiting by identity, client-certificate authentication, certificate
 rotation, UDP, or WebSocket transport. Deploy behind appropriate network
 controls, use a publicly or privately trusted certificate, keep limits

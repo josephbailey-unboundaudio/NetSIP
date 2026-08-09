@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using NetSIP;
 using System.Net;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 
 if (args.Length == 0 || Array.IndexOf(args, "--help") >= 0)
 {
@@ -43,6 +44,12 @@ int port = int.Parse(
 using ILoggerFactory loggerFactory = LoggerFactory.Create(
     builder => builder.AddSimpleConsole(options => options.SingleLine = true));
 ILogger<SipTlsServer> logger = loggerFactory.CreateLogger<SipTlsServer>();
+string? inviteRedirect = Environment.GetEnvironmentVariable("NETSIP_INVITE_REDIRECT");
+SipDialPlanResult defaultInviteResult = string.IsNullOrWhiteSpace(inviteRedirect)
+    ? SipDialPlanResult.Reject(404, "Not Found"u8.ToArray())
+    : SipDialPlanResult.Redirect(Encoding.ASCII.GetBytes(inviteRedirect));
+SipInviteRequestHandler inviteHandler = new(
+    new PrefixSipDialPlanProcessor([], defaultInviteResult));
 
 await using SipTlsServer server = new(
     new SipTlsServerOptions
@@ -50,7 +57,9 @@ await using SipTlsServer server = new(
         ListenEndPoint = new IPEndPoint(address, port),
         ServerCertificate = certificate
     },
-    new DefaultSipRequestHandler(new RegisterSipRequestHandler()),
+    new DefaultSipRequestHandler(
+        new RegisterSipRequestHandler(),
+        inviteHandler),
     logger);
 
 using CancellationTokenSource shutdown = new();

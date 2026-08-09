@@ -23,6 +23,9 @@ using System.Text;
     ("TLS server expires REGISTER bindings", TlsServerExpiresRegisterBindings),
     ("TLS server orders and bounds REGISTER state", TlsServerOrdersAndBoundsRegisterState),
     ("REGISTER response rejects injected bindings", RegisterResponseRejectsInjectedBindings),
+    ("TLS server applies INVITE dialplan", TlsServerAppliesInviteDialPlan),
+    ("TLS server validates INVITE before dialplan", TlsServerValidatesInvite),
+    ("INVITE response rejects injected dialplan output", InviteResponseRejectsInjectedOutput),
     ("TLS server preserves compact transaction headers", TlsServerPreservesCompactHeaders),
     ("TLS server handles pipelined requests with bodies", TlsServerHandlesPipelinedRequests),
     ("TLS server returns errors for malformed input", TlsServerRejectsMalformedInput),
@@ -337,7 +340,7 @@ static async Task TlsServerRejectsInvalidRegister()
         RegisterRequest("Contact: <sip:alice@client.example.com>;expires=30\r\n"),
         fragment: false);
     Assert.Contains("SIP/2.0 423 Interval Too Brief\r\n", briefExpirationResponse);
-    Assert.Contains("Min-Expires: 60\r\n", briefExpirationResponse);
+    Assert.Contains("Min-Expires: 90\r\n", briefExpirationResponse);
 
     string duplicateCSeqResponse = await SendRequestAsync(
         server.BoundEndPoint!.Port,
@@ -464,6 +467,143 @@ static async Task RegisterResponseRejectsInjectedBindings()
         RegisterRequest(string.Empty),
         fragment: false);
     Assert.Contains("SIP/2.0 400 Bad Request\r\n", response);
+    Assert.DoesNotContain("Injected:", response);
+    await server.StopAsync();
+}
+
+static async Task TlsServerAppliesInviteDialPlan()
+{
+    using X509Certificate2 certificate = CreateServerCertificate();
+    SipDialPlanResult answer = SipDialPlanResult.Answer(
+        Bytes("sips:agent@example.com"),
+        Bytes("v=0\r\ns=NetSIP\r\n"),
+        Bytes("application/sdp"));
+    PrefixSipDialPlanProcessor dialPlan = new(
+        [
+            new SipDialPlanRule(
+                "12",
+                SipDialPlanResult.Redirect(Bytes("sips:gateway@example.com"))),
+            new SipDialPlanRule("1234", answer),
+            new SipDialPlanRule(
+                "911",
+                SipDialPlanResult.Reject(403, Bytes("Forbidden"))),
+            new SipDialPlanRule(
+                "example",
+                SipDialPlanResult.Reject(486, Bytes("Busy Here")))
+        ],
+        SipDialPlanResult.Reject(404, Bytes("Not Found")));
+    SipInviteRequestHandler inviteHandler = new(dialPlan);
+    await using SipTlsServer server = CreateServer(
+        certificate,
+        new DefaultSipRequestHandler(
+            registerHandler: null,
+            inviteHandler));
+    await server.StartAsync();
+
+    string options = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        OptionsRequest(700),
+        fragment: false);
+    Assert.Contains("Allow: OPTIONS, INVITE\r\n", options);
+
+    string answered = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        InviteRequest("12345"),
+        fragment: true);
+    Assert.Contains("SIP/2.0 200 OK\r\n", answered);
+    Assert.Contains("Contact: sips:agent@example.com\r\n", answered);
+    Assert.Contains("Content-Type: application/sdp\r\n", answered);
+    Assert.Contains("\r\n\r\nv=0\r\ns=NetSIP\r\n", answered);
+
+    string redirected = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        InviteRequest("12999"),
+        fragment: false);
+    Assert.Contains("SIP/2.0 302 Moved Temporarily\r\n", redirected);
+    Assert.Contains("Contact: sips:gateway@example.com\r\n", redirected);
+
+    string rejected = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        InviteRequest("911"),
+        fragment: false);
+    Assert.Contains("SIP/2.0 403 Forbidden\r\n", rejected);
+
+    string missing = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        InviteRequest("555"),
+        fragment: false);
+    Assert.Contains("SIP/2.0 404 Not Found\r\n", missing);
+
+    string hostOnly = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        InviteRequest("555").Replace(
+            "INVITE sip:555@example.com SIP/2.0",
+            "INVITE sip:example.com SIP/2.0",
+            StringComparison.Ordinal),
+        fragment: false);
+    Assert.Contains("SIP/2.0 404 Not Found\r\n", hostOnly);
+
+    string userMatched = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        InviteRequest("example"),
+        fragment: false);
+    Assert.Contains("SIP/2.0 486 Busy Here\r\n", userMatched);
+    await server.StopAsync();
+}
+
+static async Task TlsServerValidatesInvite()
+{
+    using X509Certificate2 certificate = CreateServerCertificate();
+    CountingDialPlanProcessor dialPlan = new(
+        SipDialPlanResult.Reject(486, Bytes("Busy Here")));
+    await using SipTlsServer server = CreateServer(
+        certificate,
+        new SipInviteRequestHandler(dialPlan));
+    await server.StartAsync();
+
+    string exhausted = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        InviteRequest("100").Replace(
+            "Max-Forwards: 70",
+            "Max-Forwards: 0",
+            StringComparison.Ordinal),
+        fragment: false);
+    Assert.Contains("SIP/2.0 483 Too Many Hops\r\n", exhausted);
+
+    string invalidCSeq = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        InviteRequest("100").Replace(
+            "CSeq: 1 INVITE",
+            "CSeq: 1 OPTIONS",
+            StringComparison.Ordinal),
+        fragment: false);
+    Assert.Contains("SIP/2.0 400 Bad Request\r\n", invalidCSeq);
+
+    string missingContact = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        InviteRequest("100").Replace(
+            "Contact: <sips:caller@client.example.com>\r\n",
+            string.Empty,
+            StringComparison.Ordinal),
+        fragment: false);
+    Assert.Contains("SIP/2.0 400 Bad Request\r\n", missingContact);
+    Assert.Equal(0, dialPlan.Calls);
+    await server.StopAsync();
+}
+
+static async Task InviteResponseRejectsInjectedOutput()
+{
+    using X509Certificate2 certificate = CreateServerCertificate();
+    await using SipTlsServer server = CreateServer(
+        certificate,
+        new SipInviteRequestHandler(new UnsafeDialPlanProcessor()));
+    await server.StartAsync();
+
+    string response = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        InviteRequest("100"),
+        fragment: false);
+    Assert.Contains("SIP/2.0 500 Server Internal Error\r\n", response);
     Assert.DoesNotContain("Injected:", response);
     await server.StopAsync();
 }
@@ -696,13 +836,50 @@ static async Task<string> SendRequestAsync(int port, string request, bool fragme
         }
 
         total += read;
-        if (response.AsSpan(0, total).IndexOf("\r\n\r\n"u8) >= 0)
+        int headerEnd = response.AsSpan(0, total).IndexOf("\r\n\r\n"u8);
+        if (headerEnd >= 0 &&
+            TryReadContentLength(
+                response.AsSpan(0, headerEnd),
+                out int contentLength) &&
+            total >= headerEnd + 4 + contentLength)
         {
             break;
         }
     }
 
     return Encoding.ASCII.GetString(response, 0, total);
+}
+
+static bool TryReadContentLength(
+    ReadOnlySpan<byte> headers,
+    out int contentLength)
+{
+    ReadOnlySpan<byte> name = "Content-Length:"u8;
+    for (int index = 0; index <= headers.Length - name.Length; index++)
+    {
+        bool lineStart = index == 0 ||
+            index >= 2 &&
+            headers[(index - 2)..index].SequenceEqual("\r\n"u8);
+        if (!lineStart ||
+            !headers.Slice(index, name.Length).SequenceEqual(name))
+        {
+            continue;
+        }
+
+        ReadOnlySpan<byte> value = headers[(index + name.Length)..];
+        int lineEnd = value.IndexOf("\r\n"u8);
+        if (lineEnd >= 0)
+        {
+            value = value[..lineEnd];
+        }
+
+        return int.TryParse(
+            Encoding.ASCII.GetString(value),
+            out contentLength);
+    }
+
+    contentLength = 0;
+    return false;
 }
 
 static string OptionsRequest(int id)
@@ -729,6 +906,19 @@ static string RegisterRequest(
     $"Call-ID: {callId}\r\n" +
     $"CSeq: {cseq} REGISTER\r\n" +
     registrationHeaders +
+    "Content-Length: 0\r\n\r\n";
+}
+
+static string InviteRequest(string destination)
+{
+    return $"INVITE sip:{destination}@example.com SIP/2.0\r\n" +
+    "Via: SIP/2.0/TLS client.example.com;branch=z9hG4bK-invite\r\n" +
+    "Max-Forwards: 70\r\n" +
+    "From: <sip:caller@example.com>;tag=invite-client\r\n" +
+    $"To: <sip:{destination}@example.com>\r\n" +
+    "Call-ID: invite@example.com\r\n" +
+    "CSeq: 1 INVITE\r\n" +
+    "Contact: <sips:caller@client.example.com>\r\n" +
     "Content-Length: 0\r\n\r\n";
 }
 
@@ -906,5 +1096,34 @@ internal sealed class UnsafeBindingHandler : ISipRequestHandler
         }
 
         return ValueTask.CompletedTask;
+    }
+}
+
+internal sealed class CountingDialPlanProcessor(
+    SipDialPlanResult result) : ISipDialPlanProcessor
+{
+    public int Calls { get; private set; }
+
+    public ValueTask<SipDialPlanResult> ProcessAsync(
+        SipInviteContext context,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Calls++;
+        return ValueTask.FromResult(result);
+    }
+}
+
+internal sealed class UnsafeDialPlanProcessor : ISipDialPlanProcessor
+{
+    public ValueTask<SipDialPlanResult> ProcessAsync(
+        SipInviteContext context,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(
+            SipDialPlanResult.Redirect(
+                Encoding.ASCII.GetBytes(
+                    "sips:agent@example.com\r\nInjected: value")));
     }
 }

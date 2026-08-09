@@ -123,8 +123,12 @@ public sealed class SipResponseWriter
     /// </summary>
     /// <param name="request">The OPTIONS request to respond to.</param>
     /// <param name="allowRegister">If true, includes REGISTER in the Allow header.</param>
+    /// <param name="allowInvite">If true, includes INVITE in the Allow header.</param>
     /// <returns>true if the response was written; false if the request is not an OPTIONS request.</returns>
-    public bool WriteOptionsOk(SipMessageView request, bool allowRegister = false)
+    public bool WriteOptionsOk(
+        SipMessageView request,
+        bool allowRegister = false,
+        bool allowInvite = false)
     {
         return request.Kind == SipMessageKind.Request &&
             Ascii.EqualsIgnoreCase(request.Method, "OPTIONS"u8) && WriteResponseCore(
@@ -133,9 +137,13 @@ public sealed class SipResponseWriter
             request,
             body: default,
             contentType: default,
-            allowRegister
-                ? ResponseHeaders.OptionsAndRegister
-                : ResponseHeaders.Options);
+            (allowRegister, allowInvite) switch
+            {
+                (true, true) => ResponseHeaders.OptionsRegisterAndInvite,
+                (true, false) => ResponseHeaders.OptionsAndRegister,
+                (false, true) => ResponseHeaders.OptionsAndInvite,
+                _ => ResponseHeaders.Options
+            });
     }
 
     /// <summary>Writes a successful REGISTER response containing the current bindings.</summary>
@@ -170,6 +178,27 @@ public sealed class SipResponseWriter
             minimumExpires);
     }
 
+    /// <summary>Writes a final response selected by an INVITE dialplan.</summary>
+    public bool WriteInviteResponse(
+        SipMessageView request,
+        SipDialPlanResult result)
+    {
+        return request.Kind == SipMessageKind.Request &&
+            Ascii.EqualsIgnoreCase(request.Method, "INVITE"u8) &&
+            result.IsValid &&
+            WriteResponseCore(
+                result.StatusCode,
+                result.ReasonPhrase.Span,
+                request,
+                result.Body.Span,
+                result.ContentType.Span,
+                result.Contact.IsEmpty
+                    ? ResponseHeaders.None
+                    : ResponseHeaders.InviteContact,
+                bindings: default,
+                inviteContact: result.Contact.Span);
+    }
+
     /// <summary>
     /// Writes a response that preserves the request's transaction and dialog headers.
     /// The supplied spans are consumed before this method returns.
@@ -202,6 +231,7 @@ public sealed class SipResponseWriter
     /// <param name="responseHeaders">Additional headers to include.</param>
     /// <param name="bindings">Registration bindings for REGISTER responses.</param>
     /// <param name="minimumExpires">Minimum expiration for 423 responses.</param>
+    /// <param name="inviteContact">Contact selected by an INVITE dialplan.</param>
     /// <returns>true if the response was written; false if the request was invalid.</returns>
     private bool WriteResponseCore(
         int statusCode,
@@ -211,7 +241,8 @@ public sealed class SipResponseWriter
         ReadOnlySpan<byte> contentType,
         ResponseHeaders responseHeaders,
         ReadOnlySpan<SipRegistrationBinding> bindings = default,
-        int minimumExpires = 0)
+        int minimumExpires = 0,
+        ReadOnlySpan<byte> inviteContact = default)
     {
         if (statusCode is < 100 or > 699)
         {
@@ -295,7 +326,11 @@ public sealed class SipResponseWriter
         WriteSingleHeader(request, HeaderKind.To, "To:"u8, generatedTag[..tagLength]);
         WriteSingleHeader(request, HeaderKind.CallId, "Call-ID:"u8, generatedTag[..tagLength]);
         WriteSingleHeader(request, HeaderKind.CSeq, "CSeq:"u8, generatedTag[..tagLength]);
-        WriteAdditionalHeaders(responseHeaders, bindings, minimumExpires);
+        WriteAdditionalHeaders(
+            responseHeaders,
+            bindings,
+            minimumExpires,
+            inviteContact);
         if (!contentType.IsEmpty)
         {
             Write("Content-Type: "u8);
@@ -445,7 +480,8 @@ public sealed class SipResponseWriter
     private void WriteAdditionalHeaders(
         ResponseHeaders responseHeaders,
         ReadOnlySpan<SipRegistrationBinding> bindings,
-        int minimumExpires)
+        int minimumExpires,
+        ReadOnlySpan<byte> inviteContact)
     {
         switch (responseHeaders)
         {
@@ -456,6 +492,12 @@ public sealed class SipResponseWriter
                 return;
             case ResponseHeaders.OptionsAndRegister:
                 Write("Allow: OPTIONS, REGISTER\r\n"u8);
+                return;
+            case ResponseHeaders.OptionsAndInvite:
+                Write("Allow: OPTIONS, INVITE\r\n"u8);
+                return;
+            case ResponseHeaders.OptionsRegisterAndInvite:
+                Write("Allow: OPTIONS, REGISTER, INVITE\r\n"u8);
                 return;
             case ResponseHeaders.ConnectionClose:
                 Write("Connection: close\r\n"u8);
@@ -495,6 +537,11 @@ public sealed class SipResponseWriter
                 }
 
                 Write(minimum[..minimumLength]);
+                Write("\r\n"u8);
+                return;
+            case ResponseHeaders.InviteContact:
+                Write("Contact: "u8);
+                Write(inviteContact);
                 Write("\r\n"u8);
                 return;
             default:
@@ -725,22 +772,32 @@ public sealed class SipResponseWriter
         Options,
         /// <summary>Allow: OPTIONS, REGISTER.</summary>
         OptionsAndRegister,
+        /// <summary>Allow: OPTIONS, INVITE.</summary>
+        OptionsAndInvite,
+        /// <summary>Allow: OPTIONS, REGISTER, INVITE.</summary>
+        OptionsRegisterAndInvite,
         /// <summary>Contact headers with expiration.</summary>
         Register,
         /// <summary>Min-Expires header.</summary>
         MinExpires,
+        /// <summary>Contact selected by an INVITE dialplan.</summary>
+        InviteContact,
         /// <summary>Connection: close.</summary>
         ConnectionClose
     }
 }
 
-/// <summary>Responds to OPTIONS and REGISTER, and rejects other methods with 501.</summary>
+/// <summary>Responds to OPTIONS and optional REGISTER/INVITE requests.</summary>
 public sealed class DefaultSipRequestHandler : ISipRequestHandler
 {
     /// <summary>
     /// Optional registration handler for REGISTER requests.
     /// </summary>
     private readonly RegisterSipRequestHandler? _registerHandler;
+    /// <summary>
+    /// Optional dialplan handler for INVITE requests.
+    /// </summary>
+    private readonly SipInviteRequestHandler? _inviteHandler;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DefaultSipRequestHandler"/> class
@@ -756,14 +813,32 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
     /// </summary>
     /// <param name="registerHandler">The handler for REGISTER requests.</param>
     public DefaultSipRequestHandler(RegisterSipRequestHandler registerHandler)
+        : this(
+            registerHandler ?? throw new ArgumentNullException(nameof(registerHandler)),
+            inviteHandler: null)
     {
-        ArgumentNullException.ThrowIfNull(registerHandler);
+    }
+
+    /// <summary>Initializes a handler that supports OPTIONS and INVITE.</summary>
+    public DefaultSipRequestHandler(SipInviteRequestHandler inviteHandler)
+        : this(
+            registerHandler: null,
+            inviteHandler ?? throw new ArgumentNullException(nameof(inviteHandler)))
+    {
+    }
+
+    /// <summary>Initializes a handler with optional REGISTER and INVITE support.</summary>
+    public DefaultSipRequestHandler(
+        RegisterSipRequestHandler? registerHandler,
+        SipInviteRequestHandler? inviteHandler)
+    {
         _registerHandler = registerHandler;
+        _inviteHandler = inviteHandler;
     }
 
     /// <summary>
     /// Handles a SIP request by routing it to the appropriate handler.
-    /// Supports OPTIONS and optionally REGISTER. Rejects other methods with 501.
+    /// Supports OPTIONS and optionally REGISTER and INVITE. Rejects other methods with 501.
     /// </summary>
     /// <param name="context">The request context.</param>
     /// <param name="cancellationToken">Cancellation token for the operation.</param>
@@ -778,7 +853,8 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
         {
             if (!context.Response.WriteOptionsOk(
                     message,
-                    allowRegister: _registerHandler is not null))
+                    allowRegister: _registerHandler is not null,
+                    allowInvite: _inviteHandler is not null))
             {
                 context.Response.WriteError(400);
             }
@@ -788,6 +864,11 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
             Ascii.EqualsIgnoreCase(message.Method, "REGISTER"u8))
         {
             _registerHandler.Handle(context, message);
+        }
+        else if (_inviteHandler is not null &&
+            Ascii.EqualsIgnoreCase(message.Method, "INVITE"u8))
+        {
+            return _inviteHandler.HandleAsync(context, cancellationToken);
         }
         // Reject all other methods
         else if (!context.Response.WriteResponse(501, "Not Implemented"u8, message))
