@@ -77,6 +77,34 @@ using var certificate = SipCertificateLoader.Load(
         PfxPassword = Environment.GetEnvironmentVariable("NETSIP_PFX_PASSWORD")
     });
 
+const string realm = "sip.example.com";
+string password = Environment.GetEnvironmentVariable("NETSIP_DIGEST_PASSWORD")
+    ?? throw new InvalidOperationException("Set NETSIP_DIGEST_PASSWORD.");
+var application = new DefaultSipRequestHandler(
+    new RegisterSipRequestHandler(),
+    new SipInviteRequestHandler(
+        new PrefixSipDialPlanProcessor(
+            [
+                new SipDialPlanRule(
+                    "1",
+                    SipDialPlanResult.Redirect(
+                        "sips:gateway@example.com"u8.ToArray()))
+            ],
+            SipDialPlanResult.Reject(
+                404,
+                "Not Found"u8.ToArray()))));
+var credentials = new InMemorySipDigestCredentialProvider(
+    realm,
+    [new KeyValuePair<string, string>("alice", password)]);
+var handler = new SipDigestAuthenticationHandler(
+    application,
+    credentials,
+    new SipDigestAuthenticationOptions
+    {
+        Realm = realm,
+        Algorithms = SipDigestAlgorithms.Sha256
+    });
+
 await using var server = new SipTlsServer(
     new SipTlsServerOptions
     {
@@ -93,19 +121,7 @@ await using var server = new SipTlsServer(
             MaxMessagesPerConnection = 10_000
         }
     },
-    new DefaultSipRequestHandler(
-        new RegisterSipRequestHandler(),
-        new SipInviteRequestHandler(
-            new PrefixSipDialPlanProcessor(
-                [
-                    new SipDialPlanRule(
-                        "1",
-                        SipDialPlanResult.Redirect(
-                            "sips:gateway@example.com"u8.ToArray()))
-                ],
-                SipDialPlanResult.Reject(
-                    404,
-                    "Not Found"u8.ToArray())))));
+    handler);
 
 await server.StartAsync();
 ```
@@ -140,6 +156,31 @@ user and returns an owned `SipDialPlanResult`: `Answer` (200 with Contact and
 optional body), `Redirect` (3xx with Contact), or `Reject` (4xx-6xx).
 Custom processors may perform asynchronous routing lookups while the borrowed
 `SipInviteContext` remains valid only until `ProcessAsync` completes.
+
+`SipDigestAuthenticationHandler` can protect REGISTER, INVITE, or both before
+delegating to the application handler. It implements SIP Digest with
+`qop=auth`, prefers SHA-256, binds the response to the exact method and
+request URI, compares digests in constant time, signs expiring nonces with a
+per-process HMAC secret, and keeps a bounded highest-`nc` replay table.
+`ISipDigestCredentialProvider` supports asynchronous credential lookup and
+returns owned H(A1) values so plaintext passwords need not be retained.
+`InMemorySipDigestCredentialProvider` hashes configured passwords during
+startup and does not retain them. If the replay table is full of live entries,
+new authentications fail closed until an entry expires rather than weakening
+replay protection.
+
+Authorization parsing is intentionally strict: duplicate Authorization headers,
+duplicate known parameters, escaped quoted-pairs, invalid UTF-8 usernames, and
+digest URIs that are not byte-identical to the request target are rejected.
+
+MD5 is available only for legacy interoperability by enabling
+`SipDigestAlgorithms.Md5`. When SHA-256 and MD5 are enabled, the server emits
+separate challenges in preference order. MD5 is cryptographically weak and
+must not be enabled unless required by a client; TLS remains mandatory because
+Digest does not encrypt SIP headers or bodies. The sample enables
+authentication when `NETSIP_DIGEST_USERNAME` and `NETSIP_DIGEST_PASSWORD` are
+set. `NETSIP_DIGEST_REALM` selects the realm, and
+`NETSIP_DIGEST_ALLOW_MD5=true` opts into MD5.
 
 The sample enables a catch-all INVITE dialplan. Set
 `NETSIP_INVITE_REDIRECT` to a safe SIP/SIPS contact URI to redirect calls;
@@ -196,13 +237,15 @@ close silently because no valid SIP transaction is available to receive a 408.
 Error responses are sent after TLS establishment when possible, then the
 connection is closed.
 
-NetSIP is a transport/parser with a process-local registrar, not a complete SIP
-proxy or distributed registrar. It does not provide digest authentication,
-authorization, transaction/dialog or media-session storage, durable/shared location storage,
-rate limiting by identity, client-certificate authentication, certificate
-rotation, UDP, or WebSocket transport. Deploy behind appropriate network
-controls, use a publicly or privately trusted certificate, keep limits
-conservative, and implement application authentication in the handler.
+NetSIP is a transport/parser with a process-local registrar and optional Digest
+gate, not a complete SIP proxy or distributed registrar. Digest authentication
+does not provide authorization, account lockout, or identity/IP rate limiting.
+NetSIP also does not provide transaction/dialog or media-session storage,
+durable/shared location storage, client-certificate authentication,
+certificate rotation, UDP, or WebSocket transport. Deploy behind appropriate
+network controls, use a publicly or privately trusted certificate, keep limits
+conservative, authorize authenticated identities in the application, and add
+rate limiting appropriate to the deployment.
 
 ## Allocation boundary
 
@@ -227,6 +270,8 @@ timers, logging providers, cryptography, and connection tracking may allocate.
 NetSIP allocates connection state once per connection and reuses its request
 context and timeout sources. A message spanning pipeline segments is copied
 through `ArrayPool<byte>` and returned after dispatch; pool growth can allocate.
+Digest authentication allocates an owned username for asynchronous credential
+lookup and bounded replay state after successful authentication.
 Calling `CopyMessage`, retaining application state, or allocating in a custom
 handler is explicitly outside the parser/serializer guarantee.
 

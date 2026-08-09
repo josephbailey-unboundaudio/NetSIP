@@ -15,6 +15,9 @@ if (args.Length == 0 || Array.IndexOf(args, "--help") >= 0)
 
         Password environment variables default to NETSIP_PFX_PASSWORD and
         NETSIP_PEM_KEY_PASSWORD. Passwords and private-key material are never logged.
+        Set NETSIP_DIGEST_USERNAME and NETSIP_DIGEST_PASSWORD to protect REGISTER
+        and INVITE. NETSIP_DIGEST_REALM defaults to NetSIP. Set
+        NETSIP_DIGEST_ALLOW_MD5=true only for legacy client interoperability.
         """);
     return;
 }
@@ -50,6 +53,39 @@ SipDialPlanResult defaultInviteResult = string.IsNullOrWhiteSpace(inviteRedirect
     : SipDialPlanResult.Redirect(Encoding.ASCII.GetBytes(inviteRedirect));
 SipInviteRequestHandler inviteHandler = new(
     new PrefixSipDialPlanProcessor([], defaultInviteResult));
+ISipRequestHandler applicationHandler = new DefaultSipRequestHandler(
+    new RegisterSipRequestHandler(),
+    inviteHandler);
+string? digestUserName = Environment.GetEnvironmentVariable("NETSIP_DIGEST_USERNAME");
+string? digestPassword = Environment.GetEnvironmentVariable("NETSIP_DIGEST_PASSWORD");
+if (digestUserName is not null || digestPassword is not null)
+{
+    if (string.IsNullOrWhiteSpace(digestUserName) || digestPassword is null)
+    {
+        throw new InvalidOperationException(
+            "NETSIP_DIGEST_USERNAME and NETSIP_DIGEST_PASSWORD must both be set.");
+    }
+
+    string digestRealm =
+        Environment.GetEnvironmentVariable("NETSIP_DIGEST_REALM") ?? "NetSIP";
+    bool allowMd5 = string.Equals(
+        Environment.GetEnvironmentVariable("NETSIP_DIGEST_ALLOW_MD5"),
+        "true",
+        StringComparison.OrdinalIgnoreCase);
+    InMemorySipDigestCredentialProvider credentials = new(
+        digestRealm,
+        [new KeyValuePair<string, string>(digestUserName, digestPassword)]);
+    applicationHandler = new SipDigestAuthenticationHandler(
+        applicationHandler,
+        credentials,
+        new SipDigestAuthenticationOptions
+        {
+            Realm = digestRealm,
+            Algorithms = allowMd5
+                ? SipDigestAlgorithms.Sha256 | SipDigestAlgorithms.Md5
+                : SipDigestAlgorithms.Sha256
+        });
+}
 
 await using SipTlsServer server = new(
     new SipTlsServerOptions
@@ -57,9 +93,7 @@ await using SipTlsServer server = new(
         ListenEndPoint = new IPEndPoint(address, port),
         ServerCertificate = certificate
     },
-    new DefaultSipRequestHandler(
-        new RegisterSipRequestHandler(),
-        inviteHandler),
+    applicationHandler,
     logger);
 
 using CancellationTokenSource shutdown = new();
