@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging;
 using NetSIP;
 
@@ -24,7 +25,7 @@ string? keyPath = Get(arguments, "--key");
 string pfxPasswordEnvironment = Get(arguments, "--password-env") ?? "NETSIP_PFX_PASSWORD";
 string pemPasswordEnvironment = Get(arguments, "--key-password-env") ?? "NETSIP_PEM_KEY_PASSWORD";
 
-using var certificate = SipCertificateLoader.Load(
+using X509Certificate2 certificate = SipCertificateLoader.Load(
     new SipCertificateOptions
     {
         PfxPath = pfxPath,
@@ -43,16 +44,16 @@ using ILoggerFactory loggerFactory = LoggerFactory.Create(
     builder => builder.AddSimpleConsole(options => options.SingleLine = true));
 ILogger<SipTlsServer> logger = loggerFactory.CreateLogger<SipTlsServer>();
 
-await using var server = new SipTlsServer(
+await using SipTlsServer server = new(
     new SipTlsServerOptions
     {
         ListenEndPoint = new IPEndPoint(address, port),
         ServerCertificate = certificate
     },
-    new DefaultSipRequestHandler(),
+    new DefaultSipRequestHandler(new RegisterSipRequestHandler()),
     logger);
 
-using var shutdown = new CancellationTokenSource();
+using CancellationTokenSource shutdown = new();
 Console.CancelKeyPress += (_, eventArgs) =>
 {
     eventArgs.Cancel = true;
@@ -72,7 +73,7 @@ await server.StopAsync();
 
 static Dictionary<string, string> ParseArguments(string[] values)
 {
-    var result = new Dictionary<string, string>(StringComparer.Ordinal);
+    Dictionary<string, string> result = [with(StringComparer.Ordinal)];
     for (int i = 0; i < values.Length; i += 2)
     {
         if (i + 1 >= values.Length || !values[i].StartsWith("--", StringComparison.Ordinal))
@@ -86,5 +87,7 @@ static Dictionary<string, string> ParseArguments(string[] values)
     return result;
 }
 
-static string? Get(Dictionary<string, string> values, string key) =>
-    values.TryGetValue(key, out string? value) ? value : null;
+static string? Get(Dictionary<string, string> values, string key)
+{
+    return values.TryGetValue(key, out string? value) ? value : null;
+}
