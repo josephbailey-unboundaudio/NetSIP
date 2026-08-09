@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/NetSIP.Benchmarks/NetSIP.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/NetSIP.Sample/NetSIP.Sample.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/NetSIP/NetSIP.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/NetSIP.Tests/NetSIP.Tests.csproj" />
+  </Folder>
+</Solution>
