@@ -218,7 +218,7 @@ public static class SipParser
         // Check for control characters (excluding space and tab)
         foreach (byte value in line)
         {
-            if (value is < 0x20 and not (byte)' ' and not (byte)'\t' or 0x7f)
+            if (value is (< 0x20 and not (byte)' ' and not (byte)'\t') or 0x7f)
             {
                 result = default;
                 return false;
@@ -346,7 +346,7 @@ public static class SipParser
         foreach (byte current in value)
         {
             // Allow tab and printable characters (0x20-0x7E), but not control characters or DEL
-            if (current is < 0x20 and not ((byte)'\t') or 0x7f)
+            if (current is (< 0x20 and not ((byte)'\t')) or 0x7f)
             {
                 return false;
             }

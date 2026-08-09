@@ -214,7 +214,7 @@ public static class SipMessageFramer
             foreach (byte current in segment.Span)
             {
                 // Allow tab and printable characters, but not control characters or DEL
-                if (current is < 0x20 and not ((byte)'\t') or 0x7f)
+                if (current is (< 0x20 and not ((byte)'\t')) or 0x7f)
                 {
                     return false;
                 }

@@ -1,7 +1,7 @@
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging;
 using NetSIP;
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
 
 if (args.Length == 0 || Array.IndexOf(args, "--help") >= 0)
 {

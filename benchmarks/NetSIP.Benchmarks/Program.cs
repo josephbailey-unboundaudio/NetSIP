@@ -1,6 +1,6 @@
+using NetSIP;
 using System.Diagnostics;
 using System.Text;
-using NetSIP;
 
 const int warmupIterations = 100_000;
 const int measuredIterations = 1_000_000;

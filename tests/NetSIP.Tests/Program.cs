@@ -1,3 +1,4 @@
+using NetSIP;
 using System.Buffers;
 using System.Net;
 using System.Net.Security;
@@ -6,7 +7,6 @@ using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
-using NetSIP;
 
 (string Name, Func<Task> Run)[] tests =
 [
@@ -617,7 +617,7 @@ static Task CertificateLoaderSupportsPfxAndPem()
     string pfxPath = Path.Combine(directory, "server.pfx");
     string certPath = Path.Combine(directory, "server.pem");
     string keyPath = Path.Combine(directory, "server.key");
-    Directory.CreateDirectory(directory);
+    _ = Directory.CreateDirectory(directory);
 
     try
     {

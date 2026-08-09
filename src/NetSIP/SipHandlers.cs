@@ -1,7 +1,7 @@
 using System.Buffers;
 using System.Buffers.Text;
-using System.Net;
 using System.IO.Pipelines;
+using System.Net;
 using System.Security.Cryptography;
 
 namespace NetSIP;
@@ -650,7 +650,7 @@ public sealed class SipResponseWriter
     {
         foreach (byte current in value)
         {
-            if (current is < 0x20 and not ((byte)'\t') or 0x7f)
+            if (current is (< 0x20 and not ((byte)'\t')) or 0x7f)
             {
                 return false;
             }

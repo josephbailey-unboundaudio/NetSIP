@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.IO.Pipelines;
@@ -6,8 +8,6 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace NetSIP;
 
@@ -130,7 +130,7 @@ public sealed class SipTlsServer : IAsyncDisposable
         {
             // Clean up on failure
             listener.Dispose();
-            Interlocked.Exchange(ref _state, 0);
+            _ = Interlocked.Exchange(ref _state, 0);
             throw;
         }
     }
@@ -209,14 +209,14 @@ public sealed class SipTlsServer : IAsyncDisposable
                 }
                 catch
                 {
-                    _connectionSlots.Release();
+                    _ = _connectionSlots.Release();
                     throw;
                 }
 
                 // Start handling the connection
                 long connectionId = Interlocked.Increment(ref _nextConnectionId);
                 Task connection = HandleConnectionAsync(connectionId, socket, cancellationToken);
-                _connections.TryAdd(connectionId, connection);
+                _ = _connections.TryAdd(connectionId, connection);
 
                 // Schedule cleanup when connection completes
                 _ = connection.ContinueWith(
@@ -399,7 +399,7 @@ public sealed class SipTlsServer : IAsyncDisposable
                 if (frameStatus != SipFrameStatus.Complete)
                 {
                     response.WriteError(frameStatus == SipFrameStatus.TooLarge ? 513 : 400);
-                    await response.FlushAsync(serverCancellationToken).ConfigureAwait(false);
+                    _ = await response.FlushAsync(serverCancellationToken).ConfigureAwait(false);
                     reader.AdvanceTo(buffer.End);
                     return;
                 }
@@ -428,7 +428,7 @@ public sealed class SipTlsServer : IAsyncDisposable
                 if (!buffer.IsEmpty)
                 {
                     response.WriteError(400);
-                    await response.FlushAsync(serverCancellationToken).ConfigureAwait(false);
+                    _ = await response.FlushAsync(serverCancellationToken).ConfigureAwait(false);
                 }
 
                 return;
@@ -478,7 +478,7 @@ public sealed class SipTlsServer : IAsyncDisposable
                     response.WriteError(400);
                 }
 
-                await response.FlushAsync(serverCancellationToken).ConfigureAwait(false);
+                _ = await response.FlushAsync(serverCancellationToken).ConfigureAwait(false);
                 return false;
             }
 
@@ -490,7 +490,7 @@ public sealed class SipTlsServer : IAsyncDisposable
                     response.WriteError(400);
                 }
 
-                await response.FlushAsync(serverCancellationToken).ConfigureAwait(false);
+                _ = await response.FlushAsync(serverCancellationToken).ConfigureAwait(false);
                 return false;
             }
 
@@ -516,7 +516,7 @@ public sealed class SipTlsServer : IAsyncDisposable
                     response.ForceCloseAfterFlush();
                 }
 
-                await response.FlushAsync(serverCancellationToken).ConfigureAwait(false);
+                _ = await response.FlushAsync(serverCancellationToken).ConfigureAwait(false);
                 return false;
             }
 

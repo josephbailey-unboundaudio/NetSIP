@@ -208,7 +208,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         lock (_gate)
         {
             // Check for existing address-of-record
-            _addresses.TryGetValue(request.AddressOfRecord, out AddressBindings? address);
+            _ = _addresses.TryGetValue(request.AddressOfRecord, out AddressBindings? address);
             if (address is not null)
             {
                 // Clean up expired bindings and sequences
@@ -216,7 +216,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 RemoveExpired(address, now);
                 if (address.Bindings.Count == 0 && address.Sequences.Count == 0)
                 {
-                    _addresses.Remove(request.AddressOfRecord);
+                    _ = _addresses.Remove(request.AddressOfRecord);
                     _storedBytes -= beforeCleanup;
                     address = null;
                 }
@@ -276,7 +276,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 {
                     if (change.ExpirationSeconds == 0)
                     {
-                        updatedBindings.Remove(change.Key);
+                        _ = updatedBindings.Remove(change.Key);
                         continue;
                     }
 
@@ -850,9 +850,9 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         {
             int closeBracket = hostPort.IndexOf((byte)']');
             return closeBracket > 1 && (closeBracket == hostPort.Length - 1 ||
-                closeBracket + 1 < hostPort.Length &&
+                (closeBracket + 1 < hostPort.Length &&
                 hostPort[closeBracket + 1] == (byte)':' &&
-                TryParsePort(hostPort[(closeBracket + 2)..]));
+                TryParsePort(hostPort[(closeBracket + 2)..])));
         }
 
         int portSeparator = hostPort.LastIndexOf((byte)':');
@@ -1034,26 +1034,26 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         }
 
         StringBuilder builder = new(raw.Length);
-        builder.Append(scheme).Append(':').Append(userInfo).Append(host).Append(port);
+        _ = builder.Append(scheme).Append(':').Append(userInfo).Append(host).Append(port);
         if (normalizedParameters is not null)
         {
             foreach (string value in normalizedParameters)
             {
-                builder.Append(';').Append(value);
+                _ = builder.Append(';').Append(value);
             }
         }
 
         if (normalizedHeaders is not null)
         {
-            builder.Append('?');
+            _ = builder.Append('?');
             for (int index = 0; index < normalizedHeaders.Count; index++)
             {
                 if (index > 0)
                 {
-                    builder.Append('&');
+                    _ = builder.Append('&');
                 }
 
-                builder.Append(normalizedHeaders[index]);
+                _ = builder.Append(normalizedHeaders[index]);
             }
         }
 
@@ -1072,7 +1072,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
             char current = value[index];
             if (current != '%')
             {
-                builder.Append(lowerCase ? char.ToLowerInvariant(current) : current);
+                _ = builder.Append(lowerCase ? char.ToLowerInvariant(current) : current);
                 continue;
             }
 
@@ -1085,17 +1085,12 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
             }
 
             char decoded = (char)((high << 4) | low);
-            if (char.IsAsciiLetterOrDigit(decoded) ||
-                decoded is '-' or '.' or '_' or '~')
-            {
-                builder.Append(lowerCase ? char.ToLowerInvariant(decoded) : decoded);
-            }
-            else
-            {
-                builder.Append('%')
+            _ = char.IsAsciiLetterOrDigit(decoded) ||
+                decoded is '-' or '.' or '_' or '~'
+                ? builder.Append(lowerCase ? char.ToLowerInvariant(decoded) : decoded)
+                : builder.Append('%')
                     .Append(char.ToUpperInvariant(value[index + 1]))
                     .Append(char.ToUpperInvariant(value[index + 2]));
-            }
 
             index += 2;
         }
@@ -1280,7 +1275,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         {
             foreach (string key in expired)
             {
-                address.Bindings.Remove(key);
+                _ = address.Bindings.Remove(key);
             }
         }
 
@@ -1298,7 +1293,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         {
             foreach (string key in expired)
             {
-                address.Sequences.Remove(key);
+                _ = address.Sequences.Remove(key);
             }
         }
 
@@ -1334,7 +1329,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
 
         foreach (string key in emptyAddresses)
         {
-            _addresses.Remove(key);
+            _ = _addresses.Remove(key);
         }
     }
 
