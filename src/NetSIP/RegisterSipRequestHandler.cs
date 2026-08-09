@@ -853,6 +853,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 (closeBracket + 1 < hostPort.Length &&
                 hostPort[closeBracket + 1] == (byte)':' &&
                 TryParsePort(hostPort[(closeBracket + 2)..])));
+>>>>>>>>> Temporary merge branch 2
         }
 
         int portSeparator = hostPort.LastIndexOf((byte)':');
@@ -1033,8 +1034,9 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
             normalizedHeaders.Sort(StringComparer.Ordinal);
         }
 
-        StringBuilder builder = new(raw.Length);
         _ = builder.Append(scheme).Append(':').Append(userInfo).Append(host).Append(port);
+>>>>>>>>> Temporary merge branch 2
+        builder.Append(scheme).Append(':').Append(userInfo).Append(host).Append(port);
         if (normalizedParameters is not null)
         {
             foreach (string value in normalizedParameters)
