@@ -1,98 +1,13 @@
 using System.Buffers;
 using System.Buffers.Text;
 using System.IO.Pipelines;
-using System.Net;
 using System.Security.Cryptography;
 
 namespace NetSIP;
 
 /// <summary>
-/// Handles one SIP message at a time. The supplied context is reused for the connection;
-/// handlers must not retain it, its message view, or any borrowed memory after completion.
-/// Implementations must observe the cancellation token so handler deadlines and shutdown
-/// can complete without violating borrowed-buffer lifetimes.
+/// Writes SIP responses synchronously into a pooled pipeline buffer.
 /// </summary>
-public interface ISipRequestHandler
-{
-    /// <summary>Handles one borrowed SIP message.</summary>
-    /// <param name="context">
-    /// The reusable connection context. It and its message must not be retained.
-    /// </param>
-    /// <param name="cancellationToken">The cooperative handler deadline and shutdown token.</param>
-    /// <returns>An operation that completes after the handler has finished using borrowed data.</returns>
-    ValueTask HandleAsync(SipRequestContext context, CancellationToken cancellationToken);
-}
-
-/// <summary>Per-connection context exposing the current borrowed message and response writer.</summary>
-public sealed class SipRequestContext
-{
-    /// <summary>
-    /// The borrowed message bytes for the current request.
-    /// </summary>
-    private ReadOnlyMemory<byte> _message;
-
-    /// <summary>
-    /// The metadata describing offsets into the message.
-    /// </summary>
-    private SipMessageMetadata _metadata;
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="SipRequestContext"/> class.
-    /// </summary>
-    /// <param name="remoteEndPoint">The remote endpoint of the connection.</param>
-    /// <param name="response">The response writer for this connection.</param>
-    internal SipRequestContext(EndPoint? remoteEndPoint, SipResponseWriter response)
-    {
-        RemoteEndPoint = remoteEndPoint;
-        Response = response;
-    }
-
-    /// <summary>
-    /// Gets the remote endpoint of the connection.
-    /// </summary>
-    public EndPoint? RemoteEndPoint { get; }
-
-    /// <summary>
-    /// Gets the response writer for sending SIP responses.
-    /// </summary>
-    public SipResponseWriter Response { get; }
-
-    /// <summary>
-    /// Gets a view over the current SIP request message.
-    /// The view and all spans derived from it are only valid until the handler completes.
-    /// </summary>
-    public SipMessageView Message => new(_message.Span, _metadata);
-
-    /// <summary>
-    /// Creates a copy of the current message bytes that the caller owns.
-    /// Use this if you need to retain the message data after the handler completes.
-    /// </summary>
-    /// <returns>A byte array containing a copy of the current message.</returns>
-    public byte[] CopyMessage()
-    {
-        return _message.ToArray();
-    }
-
-    /// <summary>
-    /// Sets the current message and metadata.
-    /// </summary>
-    internal void SetMessage(ReadOnlyMemory<byte> message, in SipMessageMetadata metadata)
-    {
-        _message = message;
-        _metadata = metadata;
-    }
-
-    /// <summary>
-    /// Clears the current message, releasing the borrowed memory reference.
-    /// </summary>
-    internal void ClearMessage()
-    {
-        _message = default;
-        _metadata = default;
-    }
-}
-
-/// <summary>Writes SIP responses synchronously into a pooled pipeline buffer.</summary>
 public sealed class SipResponseWriter
 {
     /// <summary>
@@ -137,7 +52,7 @@ public sealed class SipResponseWriter
         bool allowInvite = false)
     {
         return request.Kind == SipMessageKind.Request &&
-            Ascii.EqualsIgnoreCase(request.Method, "OPTIONS"u8) && WriteResponseCore(
+            AsciiUtilities.EqualsIgnoreCase(request.Method, "OPTIONS"u8) && WriteResponseCore(
             200,
             "OK"u8,
             request,
@@ -161,7 +76,7 @@ public sealed class SipResponseWriter
         ReadOnlySpan<SipRegistrationBinding> bindings)
     {
         return request.Kind == SipMessageKind.Request &&
-            Ascii.EqualsIgnoreCase(request.Method, "REGISTER"u8) &&
+            AsciiUtilities.EqualsIgnoreCase(request.Method, "REGISTER"u8) &&
             ValidateRegistrationBindings(bindings) && WriteResponseCore(
             200,
             "OK"u8,
@@ -199,7 +114,7 @@ public sealed class SipResponseWriter
         SipDialPlanResult result)
     {
         return request.Kind == SipMessageKind.Request &&
-            Ascii.EqualsIgnoreCase(request.Method, "INVITE"u8) &&
+            AsciiUtilities.EqualsIgnoreCase(request.Method, "INVITE"u8) &&
             result.IsValid &&
             WriteResponseCore(
                 result.StatusCode,
@@ -218,7 +133,9 @@ public sealed class SipResponseWriter
     /// <param name="request">The request whose transaction headers are preserved.</param>
     /// <param name="realm">A printable ASCII realm without quote or backslash.</param>
     /// <param name="nonce">A printable ASCII server nonce.</param>
-    /// <param name="algorithms">The algorithms to advertise, in secure preference order.</param>
+    /// <param name="algorithms">
+    /// Flags selecting the algorithms to advertise. SHA-256 is emitted before MD5.
+    /// </param>
     /// <param name="stale">Whether the prior nonce was valid but expired.</param>
     /// <returns>
     /// <see langword="true"/> when the challenge was written; otherwise,
@@ -228,7 +145,7 @@ public sealed class SipResponseWriter
         SipMessageView request,
         ReadOnlySpan<byte> realm,
         ReadOnlySpan<byte> nonce,
-        SipDigestAlgorithms algorithms,
+        SipDigestAlgorithmFlags algorithms,
         bool stale = false)
     {
         if (realm.IsEmpty ||
@@ -239,8 +156,8 @@ public sealed class SipResponseWriter
             throw new ArgumentException("Digest challenge values must contain safe printable ASCII.");
         }
 
-        _ = algorithms == SipDigestAlgorithms.None ||
-            (algorithms & ~(SipDigestAlgorithms.Sha256 | SipDigestAlgorithms.Md5)) != 0
+        _ = algorithms == SipDigestAlgorithmFlags.None ||
+            (algorithms & ~(SipDigestAlgorithmFlags.Sha256 | SipDigestAlgorithmFlags.Md5)) != 0
             ? throw new ArgumentOutOfRangeException(nameof(algorithms))
             : algorithms;
 
@@ -317,7 +234,7 @@ public sealed class SipResponseWriter
         ReadOnlySpan<byte> inviteContact = default,
         ReadOnlySpan<byte> digestRealm = default,
         ReadOnlySpan<byte> digestNonce = default,
-        SipDigestAlgorithms digestAlgorithms = SipDigestAlgorithms.None,
+        SipDigestAlgorithmFlags digestAlgorithms = SipDigestAlgorithmFlags.None,
         bool digestStale = false)
     {
         if (statusCode is < 100 or > 699)
@@ -564,7 +481,7 @@ public sealed class SipResponseWriter
         ReadOnlySpan<byte> inviteContact,
         ReadOnlySpan<byte> digestRealm,
         ReadOnlySpan<byte> digestNonce,
-        SipDigestAlgorithms digestAlgorithms,
+        SipDigestAlgorithmFlags digestAlgorithms,
         bool digestStale)
     {
         switch (responseHeaders)
@@ -629,7 +546,7 @@ public sealed class SipResponseWriter
                 Write("\r\n"u8);
                 return;
             case ResponseHeaders.DigestChallenge:
-                if ((digestAlgorithms & SipDigestAlgorithms.Sha256) != 0)
+                if ((digestAlgorithms & SipDigestAlgorithmFlags.Sha256) != 0)
                 {
                     WriteDigestChallengeHeader(
                         digestRealm,
@@ -638,7 +555,7 @@ public sealed class SipResponseWriter
                         digestStale);
                 }
 
-                if ((digestAlgorithms & SipDigestAlgorithms.Md5) != 0)
+                if ((digestAlgorithms & SipDigestAlgorithmFlags.Md5) != 0)
                 {
                     WriteDigestChallengeHeader(
                         digestRealm,
@@ -692,7 +609,7 @@ public sealed class SipResponseWriter
     /// </summary>
     private static bool IsVia(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "Via"u8) || Ascii.EqualsIgnoreCase(name, "v"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "Via"u8) || AsciiUtilities.EqualsIgnoreCase(name, "v"u8);
     }
 
     /// <summary>
@@ -700,7 +617,7 @@ public sealed class SipResponseWriter
     /// </summary>
     private static bool IsFrom(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "From"u8) || Ascii.EqualsIgnoreCase(name, "f"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "From"u8) || AsciiUtilities.EqualsIgnoreCase(name, "f"u8);
     }
 
     /// <summary>
@@ -708,7 +625,7 @@ public sealed class SipResponseWriter
     /// </summary>
     private static bool IsTo(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "To"u8) || Ascii.EqualsIgnoreCase(name, "t"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "To"u8) || AsciiUtilities.EqualsIgnoreCase(name, "t"u8);
     }
 
     /// <summary>
@@ -716,7 +633,7 @@ public sealed class SipResponseWriter
     /// </summary>
     private static bool IsCallId(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "Call-ID"u8) || Ascii.EqualsIgnoreCase(name, "i"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "Call-ID"u8) || AsciiUtilities.EqualsIgnoreCase(name, "i"u8);
     }
 
     /// <summary>
@@ -724,7 +641,7 @@ public sealed class SipResponseWriter
     /// </summary>
     private static bool IsCSeq(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "CSeq"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "CSeq"u8);
     }
 
     /// <summary>
@@ -801,19 +718,19 @@ public sealed class SipResponseWriter
 
             // Check if this is a 'tag' parameter
             int cursor = i + 1;
-            while (cursor < value.Length && Ascii.IsOptionalWhitespace(value[cursor]))
+            while (cursor < value.Length && AsciiUtilities.IsOptionalWhitespace(value[cursor]))
             {
                 cursor++;
             }
 
             if (cursor + 3 > value.Length ||
-                !Ascii.EqualsIgnoreCase(value.Slice(cursor, 3), "tag"u8))
+                !AsciiUtilities.EqualsIgnoreCase(value.Slice(cursor, 3), "tag"u8))
             {
                 continue;
             }
 
             cursor += 3;
-            while (cursor < value.Length && Ascii.IsOptionalWhitespace(value[cursor]))
+            while (cursor < value.Length && AsciiUtilities.IsOptionalWhitespace(value[cursor]))
             {
                 cursor++;
             }
@@ -927,95 +844,3 @@ public sealed class SipResponseWriter
     }
 }
 
-/// <summary>Responds to OPTIONS and optional REGISTER/INVITE requests.</summary>
-public sealed class DefaultSipRequestHandler : ISipRequestHandler
-{
-    /// <summary>
-    /// Optional registration handler for REGISTER requests.
-    /// </summary>
-    private readonly RegisterSipRequestHandler? _registerHandler;
-    /// <summary>
-    /// Optional dialplan handler for INVITE requests.
-    /// </summary>
-    private readonly SipInviteRequestHandler? _inviteHandler;
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="DefaultSipRequestHandler"/> class
-    /// that handles only OPTIONS requests.
-    /// </summary>
-    public DefaultSipRequestHandler()
-    {
-    }
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="DefaultSipRequestHandler"/> class
-    /// that handles OPTIONS and REGISTER requests.
-    /// </summary>
-    /// <param name="registerHandler">The handler for REGISTER requests.</param>
-    public DefaultSipRequestHandler(RegisterSipRequestHandler registerHandler)
-        : this(
-            registerHandler ?? throw new ArgumentNullException(nameof(registerHandler)),
-            inviteHandler: null)
-    {
-    }
-
-    /// <summary>Initializes a handler that supports OPTIONS and INVITE.</summary>
-    /// <param name="inviteHandler">The handler for INVITE requests.</param>
-    public DefaultSipRequestHandler(SipInviteRequestHandler inviteHandler)
-        : this(
-            registerHandler: null,
-            inviteHandler ?? throw new ArgumentNullException(nameof(inviteHandler)))
-    {
-    }
-
-    /// <summary>Initializes a handler with optional REGISTER and INVITE support.</summary>
-    /// <param name="registerHandler">The optional handler for REGISTER requests.</param>
-    /// <param name="inviteHandler">The optional handler for INVITE requests.</param>
-    public DefaultSipRequestHandler(
-        RegisterSipRequestHandler? registerHandler,
-        SipInviteRequestHandler? inviteHandler)
-    {
-        _registerHandler = registerHandler;
-        _inviteHandler = inviteHandler;
-    }
-
-    /// <summary>
-    /// Handles a SIP request by routing it to the appropriate handler.
-    /// Supports OPTIONS and optionally REGISTER and INVITE. Rejects other methods with 501.
-    /// </summary>
-    /// <param name="context">The request context.</param>
-    /// <param name="cancellationToken">Cancellation token for the operation.</param>
-    /// <returns>The selected handler operation.</returns>
-    public ValueTask HandleAsync(SipRequestContext context, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        SipMessageView message = context.Message;
-
-        if (Ascii.EqualsIgnoreCase(message.Method, "OPTIONS"u8))
-        {
-            if (!context.Response.WriteOptionsOk(
-                    message,
-                    allowRegister: _registerHandler is not null,
-                    allowInvite: _inviteHandler is not null))
-            {
-                context.Response.WriteError(400);
-            }
-        }
-        else if (_registerHandler is not null &&
-            Ascii.EqualsIgnoreCase(message.Method, "REGISTER"u8))
-        {
-            _registerHandler.Handle(context, message);
-        }
-        else if (_inviteHandler is not null &&
-            Ascii.EqualsIgnoreCase(message.Method, "INVITE"u8))
-        {
-            return _inviteHandler.HandleAsync(context, cancellationToken);
-        }
-        else if (!context.Response.WriteResponse(501, "Not Implemented"u8, message))
-        {
-            context.Response.WriteError(400);
-        }
-
-        return ValueTask.CompletedTask;
-    }
-}

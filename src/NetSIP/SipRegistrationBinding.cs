@@ -1,6 +1,8 @@
 namespace NetSIP;
 
-/// <summary>A registrar binding returned in a successful REGISTER response.</summary>
+/// <summary>
+/// A registrar binding returned in a successful REGISTER response.
+/// </summary>
 public readonly struct SipRegistrationBinding
 {
     /// <summary>

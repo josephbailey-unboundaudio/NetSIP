@@ -232,13 +232,13 @@ internal static class SipUri
         ReadOnlySpan<byte> remainder = uri[(colon + 1)..];
         int parameters = remainder.IndexOfAny((byte)';', (byte)'?');
         ReadOnlySpan<byte> address = parameters < 0 ? remainder : remainder[..parameters];
-        if (Ascii.EqualsIgnoreCase(scheme, "tel"u8))
+        if (AsciiUtilities.EqualsIgnoreCase(scheme, "tel"u8))
         {
             return address;
         }
 
-        if (!Ascii.EqualsIgnoreCase(scheme, "sip"u8) &&
-            !Ascii.EqualsIgnoreCase(scheme, "sips"u8))
+        if (!AsciiUtilities.EqualsIgnoreCase(scheme, "sip"u8) &&
+            !AsciiUtilities.EqualsIgnoreCase(scheme, "sips"u8))
         {
             return [];
         }
@@ -266,7 +266,7 @@ public sealed class SipInviteRequestHandler : ISipRequestHandler
         SipRequestContext context,
         CancellationToken cancellationToken)
     {
-        if (!Ascii.EqualsIgnoreCase(context.Message.Method, "INVITE"u8))
+        if (!AsciiUtilities.EqualsIgnoreCase(context.Message.Method, "INVITE"u8))
         {
             WriteResponse(context, context.Message, 501, "Not Implemented"u8);
             return;
@@ -306,22 +306,22 @@ public sealed class SipInviteRequestHandler : ISipRequestHandler
         while (headers.MoveNext())
         {
             SipHeaderView header = headers.Current;
-            if (Ascii.EqualsIgnoreCase(header.Name, "CSeq"u8))
+            if (AsciiUtilities.EqualsIgnoreCase(header.Name, "CSeq"u8))
             {
                 if (++cseqCount > 1 || !IsInviteCSeq(header.Value))
                 {
                     return 400;
                 }
             }
-            else if (Ascii.EqualsIgnoreCase(header.Name, "Contact"u8) ||
-                Ascii.EqualsIgnoreCase(header.Name, "m"u8))
+            else if (AsciiUtilities.EqualsIgnoreCase(header.Name, "Contact"u8) ||
+                AsciiUtilities.EqualsIgnoreCase(header.Name, "m"u8))
             {
                 if (++contactCount > 1 || header.Value.IsEmpty)
                 {
                     return 400;
                 }
             }
-            else if (Ascii.EqualsIgnoreCase(header.Name, "Max-Forwards"u8))
+            else if (AsciiUtilities.EqualsIgnoreCase(header.Name, "Max-Forwards"u8))
             {
                 if (++maxForwardsCount > 1 ||
                     !TryParseNonNegativeInteger(header.Value, out int maxForwards))
@@ -334,23 +334,23 @@ public sealed class SipInviteRequestHandler : ISipRequestHandler
                     return 483;
                 }
             }
-            else if (Ascii.EqualsIgnoreCase(header.Name, "Via"u8) ||
-                Ascii.EqualsIgnoreCase(header.Name, "v"u8))
+            else if (AsciiUtilities.EqualsIgnoreCase(header.Name, "Via"u8) ||
+                AsciiUtilities.EqualsIgnoreCase(header.Name, "v"u8))
             {
                 viaCount++;
             }
-            else if (Ascii.EqualsIgnoreCase(header.Name, "From"u8) ||
-                Ascii.EqualsIgnoreCase(header.Name, "f"u8))
+            else if (AsciiUtilities.EqualsIgnoreCase(header.Name, "From"u8) ||
+                AsciiUtilities.EqualsIgnoreCase(header.Name, "f"u8))
             {
                 fromCount++;
             }
-            else if (Ascii.EqualsIgnoreCase(header.Name, "To"u8) ||
-                Ascii.EqualsIgnoreCase(header.Name, "t"u8))
+            else if (AsciiUtilities.EqualsIgnoreCase(header.Name, "To"u8) ||
+                AsciiUtilities.EqualsIgnoreCase(header.Name, "t"u8))
             {
                 toCount++;
             }
-            else if (Ascii.EqualsIgnoreCase(header.Name, "Call-ID"u8) ||
-                Ascii.EqualsIgnoreCase(header.Name, "i"u8))
+            else if (AsciiUtilities.EqualsIgnoreCase(header.Name, "Call-ID"u8) ||
+                AsciiUtilities.EqualsIgnoreCase(header.Name, "i"u8))
             {
                 callIdCount++;
             }
@@ -368,12 +368,12 @@ public sealed class SipInviteRequestHandler : ISipRequestHandler
 
     private static bool IsInviteCSeq(ReadOnlySpan<byte> value)
     {
-        value = Ascii.TrimOptionalWhitespace(value);
+        value = AsciiUtilities.TrimOptionalWhitespace(value);
         int separator = value.IndexOfAny((byte)' ', (byte)'\t');
         return separator > 0 &&
             TryParseNonNegativeInteger(value[..separator], out _) &&
-            Ascii.EqualsIgnoreCase(
-                Ascii.TrimOptionalWhitespace(value[separator..]),
+            AsciiUtilities.EqualsIgnoreCase(
+                AsciiUtilities.TrimOptionalWhitespace(value[separator..]),
                 "INVITE"u8);
     }
 
@@ -381,7 +381,7 @@ public sealed class SipInviteRequestHandler : ISipRequestHandler
         ReadOnlySpan<byte> value,
         out int result)
     {
-        value = Ascii.TrimOptionalWhitespace(value);
+        value = AsciiUtilities.TrimOptionalWhitespace(value);
         if (value.IsEmpty)
         {
             result = 0;

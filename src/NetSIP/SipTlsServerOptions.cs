@@ -3,7 +3,9 @@ using System.Security.Cryptography.X509Certificates;
 
 namespace NetSIP;
 
-/// <summary>Configuration for <see cref="SipTlsServer"/>.</summary>
+/// <summary>
+/// Configuration for <see cref="SipTlsServer"/>.
+/// </summary>
 public sealed class SipTlsServerOptions
 {
     /// <summary>

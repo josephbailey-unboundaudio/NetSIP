@@ -5,267 +5,6 @@ using System.Text;
 
 namespace NetSIP;
 
-/// <summary>Identifies the SIP methods protected by digest authentication.</summary>
-[Flags]
-public enum SipDigestProtectedMethods
-{
-    /// <summary>No methods are protected.</summary>
-    None = 0,
-
-    /// <summary>REGISTER requests are protected.</summary>
-    Register = 1,
-
-    /// <summary>INVITE requests are protected.</summary>
-    Invite = 2
-}
-
-/// <summary>Identifies supported SIP Digest hash algorithms.</summary>
-[Flags]
-public enum SipDigestAlgorithms
-{
-    /// <summary>No algorithm is enabled.</summary>
-    None = 0,
-
-    /// <summary>SHA-256 is enabled and preferred.</summary>
-    Sha256 = 1,
-
-    /// <summary>Legacy MD5 is enabled for clients that cannot use SHA-256.</summary>
-    Md5 = 2
-}
-
-/// <summary>Configures SIP Digest authentication.</summary>
-public sealed class SipDigestAuthenticationOptions
-{
-    /// <summary>
-    /// Gets the printable ASCII authentication realm advertised to clients.
-    /// Quote and backslash are not permitted.
-    /// </summary>
-    public required string Realm { get; init; }
-
-    /// <summary>Gets the nonce lifetime, from one second through 24 hours.</summary>
-    public TimeSpan NonceLifetime { get; init; } = TimeSpan.FromMinutes(5);
-
-    /// <summary>
-    /// Gets the maximum live nonce/user replay records. Authentication fails closed
-    /// when this capacity is occupied until an entry expires.
-    /// </summary>
-    public int MaxTrackedAuthentications { get; init; } = 4096;
-
-    /// <summary>Gets the maximum accepted Authorization field-value size in bytes.</summary>
-    public int MaxAuthorizationHeaderBytes { get; init; } = 4096;
-
-    /// <summary>Gets the maximum UTF-8 username size.</summary>
-    public int MaxUserNameBytes { get; init; } = 256;
-
-    /// <summary>
-    /// Gets the advertised algorithms. SHA-256 is the secure default; MD5 is legacy-only.
-    /// </summary>
-    public SipDigestAlgorithms Algorithms { get; init; } = SipDigestAlgorithms.Sha256;
-
-    internal void Validate()
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(Realm);
-        if (!IsSafeRealm(Realm))
-        {
-            throw new ArgumentException(
-                "The digest realm must contain printable ASCII characters other than quote and backslash.",
-                nameof(Realm));
-        }
-
-        if (NonceLifetime < TimeSpan.FromSeconds(1) ||
-            NonceLifetime > TimeSpan.FromHours(24))
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(NonceLifetime),
-                "NonceLifetime must be between one second and 24 hours.");
-        }
-
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxTrackedAuthentications);
-        if (MaxAuthorizationHeaderBytes is < 256 or > 64 * 1024)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(MaxAuthorizationHeaderBytes),
-                "MaxAuthorizationHeaderBytes must be between 256 and 65536.");
-        }
-
-        if (MaxUserNameBytes is < 1 or > 4096)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(MaxUserNameBytes),
-                "MaxUserNameBytes must be between 1 and 4096.");
-        }
-
-        if (Algorithms == SipDigestAlgorithms.None ||
-            (Algorithms & ~(SipDigestAlgorithms.Sha256 | SipDigestAlgorithms.Md5)) != 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(Algorithms));
-        }
-    }
-
-    private static bool IsSafeRealm(string realm)
-    {
-        foreach (char value in realm)
-        {
-            if (value is < ' ' or > '~' or '"' or '\\')
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-}
-
-/// <summary>A digest credential containing owned H(A1) values.</summary>
-public readonly struct SipDigestCredential
-{
-    private readonly byte[]? _sha256Ha1;
-    private readonly byte[]? _md5Ha1;
-
-    private SipDigestCredential(byte[]? sha256Ha1, byte[]? md5Ha1)
-    {
-        _sha256Ha1 = sha256Ha1;
-        _md5Ha1 = md5Ha1;
-    }
-
-    internal ReadOnlySpan<byte> Sha256Ha1 => _sha256Ha1;
-
-    internal ReadOnlySpan<byte> Md5Ha1 => _md5Ha1;
-
-    /// <summary>Creates SHA-256 and MD5 credentials from a username, realm, and password.</summary>
-    /// <param name="userName">The exact username sent in the Authorization header.</param>
-    /// <param name="realm">The realm configured by the authentication handler.</param>
-    /// <param name="password">The user's plaintext password. It is not retained.</param>
-    /// <returns>An owned credential containing both H(A1) variants.</returns>
-    public static SipDigestCredential FromPassword(
-        string userName,
-        string realm,
-        string password)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(userName);
-        ArgumentNullException.ThrowIfNull(realm);
-        ArgumentNullException.ThrowIfNull(password);
-
-        int length = checked(
-            Encoding.UTF8.GetByteCount(userName) +
-            Encoding.UTF8.GetByteCount(realm) +
-            Encoding.UTF8.GetByteCount(password) +
-            2);
-        byte[] rented = ArrayPool<byte>.Shared.Rent(length);
-        try
-        {
-            // H(A1) is retained; the pooled plaintext input is cleared before return.
-            Span<byte> value = rented.AsSpan(0, length);
-            int written = Encoding.UTF8.GetBytes(userName, value);
-            value[written++] = (byte)':';
-            written += Encoding.UTF8.GetBytes(realm, value[written..]);
-            value[written++] = (byte)':';
-            written += Encoding.UTF8.GetBytes(password, value[written..]);
-
-            byte[] sha256 = new byte[32];
-            byte[] md5 = new byte[16];
-            SHA256.HashData(value[..written], sha256);
-#pragma warning disable CA5351 // MD5 is required for explicitly enabled legacy SIP Digest interoperability.
-            MD5.HashData(value[..written], md5);
-#pragma warning restore CA5351
-            return new SipDigestCredential(sha256, md5);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(rented.AsSpan(0, length));
-            ArrayPool<byte>.Shared.Return(rented);
-        }
-    }
-
-    /// <summary>Creates a credential from a precomputed 32-byte SHA-256 H(A1) value.</summary>
-    /// <param name="sha256Ha1">The binary SHA-256 digest, not its hexadecimal representation.</param>
-    /// <returns>An owned SHA-256 credential.</returns>
-    public static SipDigestCredential FromSha256Ha1(ReadOnlySpan<byte> sha256Ha1)
-    {
-        return sha256Ha1.Length == 32
-            ? new SipDigestCredential(sha256Ha1.ToArray(), md5Ha1: null)
-            : throw new ArgumentException(
-                "A SHA-256 H(A1) value must contain 32 bytes.",
-                nameof(sha256Ha1));
-    }
-
-    /// <summary>Creates a credential from a precomputed 16-byte MD5 H(A1) value.</summary>
-    /// <param name="md5Ha1">The binary MD5 digest, not its hexadecimal representation.</param>
-    /// <returns>An owned MD5 credential.</returns>
-    public static SipDigestCredential FromMd5Ha1(ReadOnlySpan<byte> md5Ha1)
-    {
-        return md5Ha1.Length == 16
-            ? new SipDigestCredential(sha256Ha1: null, md5Ha1.ToArray())
-            : throw new ArgumentException(
-                "An MD5 H(A1) value must contain 16 bytes.",
-                nameof(md5Ha1));
-    }
-}
-
-/// <summary>Resolves an owned digest credential for a username.</summary>
-public interface ISipDigestCredentialProvider
-{
-    /// <summary>Looks up a credential without retaining request-owned data.</summary>
-    /// <param name="userName">An owned username decoded as strict UTF-8.</param>
-    /// <param name="cancellationToken">A token that cancels credential lookup.</param>
-    /// <returns>The matching credential, or <see langword="null"/> for an unknown user.</returns>
-    ValueTask<SipDigestCredential?> GetCredentialAsync(
-        string userName,
-        CancellationToken cancellationToken);
-}
-
-/// <summary>Stores pre-hashed digest credentials in process memory.</summary>
-public sealed class InMemorySipDigestCredentialProvider : ISipDigestCredentialProvider
-{
-    private readonly Dictionary<string, SipDigestCredential> _credentials;
-
-    /// <summary>Builds an immutable credential store without retaining plaintext passwords.</summary>
-    /// <param name="realm">The realm used to calculate H(A1).</param>
-    /// <param name="users">Username/password pairs to hash during construction.</param>
-    public InMemorySipDigestCredentialProvider(
-        string realm,
-        IEnumerable<KeyValuePair<string, string>> users)
-    {
-        ArgumentNullException.ThrowIfNull(realm);
-        ArgumentNullException.ThrowIfNull(users);
-        _credentials = [];
-        foreach (KeyValuePair<string, string> user in users)
-        {
-            ValidateUserName(user.Key);
-            ArgumentNullException.ThrowIfNull(user.Value);
-            _credentials.Add(
-                user.Key,
-                SipDigestCredential.FromPassword(user.Key, realm, user.Value));
-        }
-    }
-
-    /// <inheritdoc />
-    public ValueTask<SipDigestCredential?> GetCredentialAsync(
-        string userName,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(
-            _credentials.TryGetValue(userName, out SipDigestCredential credential)
-                ? (SipDigestCredential?)credential
-                : null);
-    }
-
-    private static void ValidateUserName(string userName)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(userName);
-        foreach (char value in userName)
-        {
-            if (char.IsControl(value) || value is '"' or '\\')
-            {
-                throw new ArgumentException(
-                    "Digest usernames cannot contain controls, quote, or backslash.",
-                    nameof(userName));
-            }
-        }
-    }
-}
-
 /// <summary>
 /// Authenticates selected SIP methods with Digest before delegating to another handler.
 /// Authorization parsing and cryptographic work allocate outside the parser hot-path guarantee.
@@ -279,14 +18,14 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
     private static readonly UTF8Encoding s_strictUtf8 = new(false, true);
 
     private readonly ISipRequestHandler _inner;
-    private readonly ISipDigestCredentialProvider _credentialProvider;
-    private readonly SipDigestProtectedMethods _protectedMethods;
+    private readonly ISipDigestCredentialsProvider _credentialProvider;
+    private readonly SipDigestProtectedMethodFlags _protectedMethods;
     private readonly TimeProvider _timeProvider;
     private readonly byte[] _realm;
     private readonly byte[] _nonceSecret;
     private readonly byte[] _unknownUserSha256Ha1;
     private readonly byte[] _unknownUserMd5Ha1;
-    private readonly SipDigestAlgorithms _algorithms;
+    private readonly SipDigestAlgorithmFlags _algorithms;
     private readonly int _nonceLifetimeSeconds;
     private readonly int _maxTrackedAuthentications;
     private readonly int _maxAuthorizationHeaderBytes;
@@ -302,18 +41,18 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
     /// <param name="timeProvider">An optional clock, primarily for deterministic testing.</param>
     public SipDigestAuthenticationHandler(
         ISipRequestHandler inner,
-        ISipDigestCredentialProvider credentialProvider,
+        ISipDigestCredentialsProvider credentialProvider,
         SipDigestAuthenticationOptions options,
-        SipDigestProtectedMethods protectedMethods =
-            SipDigestProtectedMethods.Register | SipDigestProtectedMethods.Invite,
+        SipDigestProtectedMethodFlags protectedMethods =
+            SipDigestProtectedMethodFlags.Register | SipDigestProtectedMethodFlags.Invite,
         TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(inner);
         ArgumentNullException.ThrowIfNull(credentialProvider);
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
-        if (protectedMethods == SipDigestProtectedMethods.None ||
-            (protectedMethods & ~(SipDigestProtectedMethods.Register | SipDigestProtectedMethods.Invite)) != 0)
+        if (protectedMethods == SipDigestProtectedMethodFlags.None ||
+            (protectedMethods & ~(SipDigestProtectedMethodFlags.Register | SipDigestProtectedMethodFlags.Invite)) != 0)
         {
             throw new ArgumentOutOfRangeException(nameof(protectedMethods));
         }
@@ -391,7 +130,7 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
             return AuthenticationResult.Unauthorized;
         }
 
-        SipDigestCredential? resolvedCredential =
+        SipDigestCredentials? resolvedCredential =
             await _credentialProvider.GetCredentialAsync(userName, cancellationToken)
                 .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
@@ -404,7 +143,7 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
                 out DigestAuthorizationView authorization) ||
             !authorization.UserName.SequenceEqual(userNameBytes) ||
             !authorization.Realm.SequenceEqual(_realm) ||
-            !Ascii.EqualsIgnoreCase(authorization.Qop, "auth"u8) ||
+            !AsciiUtilities.EqualsIgnoreCase(authorization.Qop, "auth"u8) ||
             !authorization.Uri.SequenceEqual(request.RequestUri) ||
             !TryParseNonceCount(authorization.NonceCount, out uint nonceCount) ||
             authorization.Cnonce.IsEmpty)
@@ -440,7 +179,7 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
             return AuthenticationResult.Unauthorized;
         }
 
-        SipDigestCredential credential = resolvedCredential.GetValueOrDefault();
+        SipDigestCredentials credential = resolvedCredential.GetValueOrDefault();
         ReadOnlySpan<byte> credentialHa1 = algorithm == DigestAlgorithm.Sha256
             ? credential.Sha256Ha1
             : credential.Md5Ha1;
@@ -481,10 +220,11 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
 
     private bool RequiresAuthentication(ReadOnlySpan<byte> method)
     {
-        return (_protectedMethods & SipDigestProtectedMethods.Invite) != 0 &&
-                Ascii.EqualsIgnoreCase(method, "INVITE"u8) ||
-            (_protectedMethods & SipDigestProtectedMethods.Register) != 0 &&
-                Ascii.EqualsIgnoreCase(method, "REGISTER"u8);
+        return
+            ((_protectedMethods & SipDigestProtectedMethodFlags.Invite) != 0 &&
+                AsciiUtilities.EqualsIgnoreCase(method, "INVITE"u8)) ||
+            ((_protectedMethods & SipDigestProtectedMethodFlags.Register) != 0 &&
+                AsciiUtilities.EqualsIgnoreCase(method, "REGISTER"u8));
     }
 
     private bool TryGetAlgorithm(
@@ -492,21 +232,21 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
         out DigestAlgorithm algorithm)
     {
         if (value.IsEmpty &&
-            (_algorithms & SipDigestAlgorithms.Md5) != 0)
+            (_algorithms & SipDigestAlgorithmFlags.Md5) != 0)
         {
             algorithm = DigestAlgorithm.Md5;
             return true;
         }
 
-        if ((_algorithms & SipDigestAlgorithms.Sha256) != 0 &&
-            Ascii.EqualsIgnoreCase(value, "SHA-256"u8))
+        if ((_algorithms & SipDigestAlgorithmFlags.Sha256) != 0 &&
+            AsciiUtilities.EqualsIgnoreCase(value, "SHA-256"u8))
         {
             algorithm = DigestAlgorithm.Sha256;
             return true;
         }
 
-        if ((_algorithms & SipDigestAlgorithms.Md5) != 0 &&
-            Ascii.EqualsIgnoreCase(value, "MD5"u8))
+        if ((_algorithms & SipDigestAlgorithmFlags.Md5) != 0 &&
+            AsciiUtilities.EqualsIgnoreCase(value, "MD5"u8))
         {
             algorithm = DigestAlgorithm.Md5;
             return true;
@@ -736,7 +476,7 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
         while (headers.MoveNext())
         {
             SipHeaderView header = headers.Current;
-            if (!Ascii.EqualsIgnoreCase(header.Name, "Authorization"u8))
+            if (!AsciiUtilities.EqualsIgnoreCase(header.Name, "Authorization"u8))
             {
                 continue;
             }
@@ -869,10 +609,10 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
             out DigestAuthorizationView authorization)
         {
             authorization = default;
-            value = Ascii.TrimOptionalWhitespace(value);
+            value = AsciiUtilities.TrimOptionalWhitespace(value);
             const int schemeLength = 6;
             if (value.Length <= schemeLength ||
-                !Ascii.EqualsIgnoreCase(value[..schemeLength], "Digest"u8) ||
+                !AsciiUtilities.EqualsIgnoreCase(value[..schemeLength], "Digest"u8) ||
                 value[schemeLength] is not ((byte)' ' or (byte)'\t'))
             {
                 return false;
@@ -881,7 +621,7 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
             value = value[schemeLength..];
             while (true)
             {
-                value = Ascii.TrimOptionalWhitespace(value);
+                value = AsciiUtilities.TrimOptionalWhitespace(value);
                 if (value.IsEmpty)
                 {
                     break;
@@ -893,13 +633,13 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
                     return false;
                 }
 
-                ReadOnlySpan<byte> name = Ascii.TrimOptionalWhitespace(value[..equals]);
+                ReadOnlySpan<byte> name = AsciiUtilities.TrimOptionalWhitespace(value[..equals]);
                 if (!IsToken(name))
                 {
                     return false;
                 }
 
-                value = Ascii.TrimOptionalWhitespace(value[(equals + 1)..]);
+                value = AsciiUtilities.TrimOptionalWhitespace(value[(equals + 1)..]);
                 if (!TryReadParameterValue(value, out ReadOnlySpan<byte> parameter, out int consumed))
                 {
                     return false;
@@ -910,7 +650,7 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
                     return false;
                 }
 
-                value = Ascii.TrimOptionalWhitespace(value[consumed..]);
+                value = AsciiUtilities.TrimOptionalWhitespace(value[consumed..]);
                 if (value.IsEmpty)
                 {
                     break;
@@ -922,7 +662,7 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
                 }
 
                 value = value[1..];
-                if (Ascii.TrimOptionalWhitespace(value).IsEmpty)
+                if (AsciiUtilities.TrimOptionalWhitespace(value).IsEmpty)
                 {
                     return false;
                 }
@@ -940,23 +680,23 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
 
         private bool TrySet(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
         {
-            return Ascii.EqualsIgnoreCase(name, "username"u8)
+            return AsciiUtilities.EqualsIgnoreCase(name, "username"u8)
                 ? SetOnce(ref UserName, value)
-                : Ascii.EqualsIgnoreCase(name, "realm"u8)
+                : AsciiUtilities.EqualsIgnoreCase(name, "realm"u8)
                     ? SetOnce(ref Realm, value)
-                    : Ascii.EqualsIgnoreCase(name, "nonce"u8)
+                    : AsciiUtilities.EqualsIgnoreCase(name, "nonce"u8)
                         ? SetOnce(ref Nonce, value)
-                        : Ascii.EqualsIgnoreCase(name, "uri"u8)
+                        : AsciiUtilities.EqualsIgnoreCase(name, "uri"u8)
                             ? SetOnce(ref Uri, value)
-                            : Ascii.EqualsIgnoreCase(name, "response"u8)
+                            : AsciiUtilities.EqualsIgnoreCase(name, "response"u8)
                                 ? SetOnce(ref Response, value)
-                                : Ascii.EqualsIgnoreCase(name, "algorithm"u8)
+                                : AsciiUtilities.EqualsIgnoreCase(name, "algorithm"u8)
                                     ? SetOnce(ref Algorithm, value)
-                                    : Ascii.EqualsIgnoreCase(name, "cnonce"u8)
+                                    : AsciiUtilities.EqualsIgnoreCase(name, "cnonce"u8)
                                         ? SetOnce(ref Cnonce, value)
-                                        : Ascii.EqualsIgnoreCase(name, "nc"u8)
+                                        : AsciiUtilities.EqualsIgnoreCase(name, "nc"u8)
                                             ? SetOnce(ref NonceCount, value)
-                                            : !Ascii.EqualsIgnoreCase(name, "qop"u8) ||
+                                            : !AsciiUtilities.EqualsIgnoreCase(name, "qop"u8) ||
                                                 SetOnce(ref Qop, value);
         }
 
@@ -1009,7 +749,7 @@ public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
 
             int comma = value.IndexOf((byte)',');
             consumed = comma < 0 ? value.Length : comma;
-            parameter = Ascii.TrimOptionalWhitespace(value[..consumed]);
+            parameter = AsciiUtilities.TrimOptionalWhitespace(value[..consumed]);
             return !parameter.IsEmpty && IsSafeTokenValue(parameter);
         }
 

@@ -4,7 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <NoWarn>$(NoWarn)</NoWarn>
     <PackageId>NetSIP</PackageId>
     <Description>Allocation-conscious SIP over TLS server and byte-oriented SIP parser.</Description>
   </PropertyGroup>

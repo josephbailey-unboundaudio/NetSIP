@@ -1,0 +1,35 @@
+.card {
+  background: var(--code-background);
+  border-radius: var(--border-radius-small);
+  flex: 1;
+  margin: 0;
+}
+.card .card-text {
+  padding-top: 7.5px;
+}
+.card .card-text, .card-text > p, .card-text a {
+  font-size: var(--navigation-font-size) !important;
+}
+.card-text div > a {
+  display: contents;
+  line-height: var(--content-line-height);
+}
+.card .card-text, .card-text > p:last-child {
+  margin-bottom: 0px;
+}
+
+@media only screen and (max-width: 767px) {
+  .row {
+    flex-direction: column !important;
+  }
+}
+.row {
+  display: flex;
+  gap: 25px;
+  align-items: stretch;
+}
+.column {
+  display: flex;
+  flex: 50%;
+  box-sizing: border-box;
+}

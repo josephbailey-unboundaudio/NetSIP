@@ -2,84 +2,6 @@ using System.Text;
 
 namespace NetSIP;
 
-/// <summary>Limits and expiration policy for the bounded in-memory REGISTER handler.</summary>
-public sealed class SipRegisterHandlerOptions
-{
-    /// <summary>
-    /// Gets or initializes the default expiration time in seconds for registrations.
-    /// </summary>
-    public int DefaultExpirationSeconds { get; init; } = 180;
-
-    /// <summary>
-    /// Gets or initializes the minimum allowed expiration time in seconds.
-    /// </summary>
-    public int MinimumExpirationSeconds { get; init; } = 90;
-
-    /// <summary>
-    /// Gets or initializes the maximum allowed expiration time in seconds.
-    /// </summary>
-    public int MaximumExpirationSeconds { get; init; } = 300;
-
-    /// <summary>
-    /// Gets or initializes the maximum number of addresses of record that can be stored.
-    /// </summary>
-    public int MaxAddressesOfRecord { get; init; } = 10_000;
-
-    /// <summary>
-    /// Gets or initializes the maximum number of bindings per address of record.
-    /// </summary>
-    public int MaxBindingsPerAddress { get; init; } = 32;
-
-    /// <summary>
-    /// Gets or initializes the maximum number of unique Call-IDs tracked per address.
-    /// </summary>
-    public int MaxCallIdsPerAddress { get; init; } = 64;
-
-    /// <summary>
-    /// Gets or initializes the maximum size of one complete Contact field value.
-    /// </summary>
-    public int MaxContactBytes { get; init; } = 2048;
-
-    /// <summary>
-    /// Gets or initializes the maximum size in bytes of an address of record.
-    /// </summary>
-    public int MaxAddressOfRecordBytes { get; init; } = 512;
-
-    /// <summary>
-    /// Gets or initializes the maximum size in bytes of a Call-ID.
-    /// </summary>
-    public int MaxCallIdBytes { get; init; } = 256;
-
-    /// <summary>
-    /// Gets or initializes the maximum estimated memory attributed to registrar state.
-    /// </summary>
-    public long MaxStoredBytes { get; init; } = 16 * 1024 * 1024;
-
-    /// <summary>
-    /// Validates that all options have valid values and consistent expiration policy.
-    /// </summary>
-    internal void Validate()
-    {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(DefaultExpirationSeconds);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MinimumExpirationSeconds);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaximumExpirationSeconds);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxAddressesOfRecord);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxBindingsPerAddress);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxCallIdsPerAddress);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxContactBytes);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxAddressOfRecordBytes);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxCallIdBytes);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxStoredBytes);
-
-        if (MinimumExpirationSeconds > DefaultExpirationSeconds ||
-            DefaultExpirationSeconds > MaximumExpirationSeconds)
-        {
-            throw new ArgumentException(
-                "Expiration policy must satisfy minimum <= default <= maximum.");
-        }
-    }
-}
-
 /// <summary>
 /// Handles REGISTER using a bounded, process-local location store. Bindings are
 /// removed on expiration and are not durable across process restarts.
@@ -144,7 +66,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
     /// </summary>
     internal void Handle(SipRequestContext context, SipMessageView message)
     {
-        if (!Ascii.EqualsIgnoreCase(message.Method, "REGISTER"u8))
+        if (!AsciiUtilities.EqualsIgnoreCase(message.Method, "REGISTER"u8))
         {
             WriteFailure(context, message, 501, "Not Implemented"u8);
             return;
@@ -550,7 +472,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 return false;
             }
 
-            ReadOnlySpan<byte> item = Ascii.TrimOptionalWhitespace(value[itemStart..index]);
+            ReadOnlySpan<byte> item = AsciiUtilities.TrimOptionalWhitespace(value[itemStart..index]);
             if (item.IsEmpty)
             {
                 result = ParseResult.Malformed;
@@ -707,26 +629,26 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
             }
 
             int nameStart = index + 1;
-            while (nameStart < contact.Length && Ascii.IsOptionalWhitespace(contact[nameStart]))
+            while (nameStart < contact.Length && AsciiUtilities.IsOptionalWhitespace(contact[nameStart]))
             {
                 nameStart++;
             }
 
             if (nameStart + 7 > contact.Length ||
-                !Ascii.EqualsIgnoreCase(contact.Slice(nameStart, 7), "expires"u8))
+                !AsciiUtilities.EqualsIgnoreCase(contact.Slice(nameStart, 7), "expires"u8))
             {
                 continue;
             }
 
             int cursor = nameStart + 7;
             if (cursor < contact.Length &&
-                !Ascii.IsOptionalWhitespace(contact[cursor]) &&
+                !AsciiUtilities.IsOptionalWhitespace(contact[cursor]) &&
                 contact[cursor] != (byte)'=')
             {
                 continue;
             }
 
-            while (cursor < contact.Length && Ascii.IsOptionalWhitespace(contact[cursor]))
+            while (cursor < contact.Length && AsciiUtilities.IsOptionalWhitespace(contact[cursor]))
             {
                 cursor++;
             }
@@ -736,7 +658,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 return false;
             }
 
-            while (cursor < contact.Length && Ascii.IsOptionalWhitespace(contact[cursor]))
+            while (cursor < contact.Length && AsciiUtilities.IsOptionalWhitespace(contact[cursor]))
             {
                 cursor++;
             }
@@ -747,7 +669,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 cursor++;
             }
 
-            ReadOnlySpan<byte> value = Ascii.TrimOptionalWhitespace(contact[valueStart..cursor]);
+            ReadOnlySpan<byte> value = AsciiUtilities.TrimOptionalWhitespace(contact[valueStart..cursor]);
             if (expiration.HasValue ||
                 !TryParseNonNegativeInteger(value, out int parsed))
             {
@@ -768,7 +690,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         SipUriContext context,
         out ReadOnlySpan<byte> uri)
     {
-        value = Ascii.TrimOptionalWhitespace(value);
+        value = AsciiUtilities.TrimOptionalWhitespace(value);
         int open = FindOutsideQuotes(value, (byte)'<', 0);
         if (open >= 0)
         {
@@ -779,20 +701,20 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 return false;
             }
 
-            uri = Ascii.TrimOptionalWhitespace(
+            uri = AsciiUtilities.TrimOptionalWhitespace(
                 value[(open + 1)..close]);
         }
         else
         {
             int parameter = FindHeaderParameterStart(value, context);
-            uri = Ascii.TrimOptionalWhitespace(
+            uri = AsciiUtilities.TrimOptionalWhitespace(
                 parameter < 0 ? value : value[..parameter]);
         }
 
         bool sip = uri.Length >= 4 &&
-            Ascii.EqualsIgnoreCase(uri[..4], "sip:"u8);
+            AsciiUtilities.EqualsIgnoreCase(uri[..4], "sip:"u8);
         bool sips = uri.Length >= 5 &&
-            Ascii.EqualsIgnoreCase(uri[..5], "sips:"u8);
+            AsciiUtilities.EqualsIgnoreCase(uri[..5], "sips:"u8);
         if (!sip && !sips)
         {
             return false;
@@ -871,13 +793,13 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 cursor++;
             }
 
-            ReadOnlySpan<byte> name = Ascii.TrimOptionalWhitespace(value[nameStart..cursor]);
+            ReadOnlySpan<byte> name = AsciiUtilities.TrimOptionalWhitespace(value[nameStart..cursor]);
             bool headerParameter = context switch
             {
                 SipUriContext.Contact =>
-                    Ascii.EqualsIgnoreCase(name, "expires"u8) ||
-                    Ascii.EqualsIgnoreCase(name, "q"u8),
-                SipUriContext.To => Ascii.EqualsIgnoreCase(name, "tag"u8),
+                    AsciiUtilities.EqualsIgnoreCase(name, "expires"u8) ||
+                    AsciiUtilities.EqualsIgnoreCase(name, "q"u8),
+                SipUriContext.To => AsciiUtilities.EqualsIgnoreCase(name, "tag"u8),
                 _ => false
             };
             if (headerParameter)
@@ -1158,7 +1080,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         ReadOnlySpan<byte> value,
         out int sequence)
     {
-        value = Ascii.TrimOptionalWhitespace(value);
+        value = AsciiUtilities.TrimOptionalWhitespace(value);
         int separator = value.IndexOfAny((byte)' ', (byte)'\t');
         if (separator <= 0 ||
             !TryParseNonNegativeInteger(value[..separator], out sequence))
@@ -1167,8 +1089,8 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
             return false;
         }
 
-        return Ascii.EqualsIgnoreCase(
-            Ascii.TrimOptionalWhitespace(value[separator..]),
+        return AsciiUtilities.EqualsIgnoreCase(
+            AsciiUtilities.TrimOptionalWhitespace(value[separator..]),
             "REGISTER"u8);
     }
 
@@ -1182,7 +1104,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         ReadOnlySpan<byte> value,
         out int result)
     {
-        value = Ascii.TrimOptionalWhitespace(value);
+        value = AsciiUtilities.TrimOptionalWhitespace(value);
         if (value.IsEmpty)
         {
             result = 0;
@@ -1208,42 +1130,42 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
 
     private static bool IsContact(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "Contact"u8) ||
-        Ascii.EqualsIgnoreCase(name, "m"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "Contact"u8) ||
+        AsciiUtilities.EqualsIgnoreCase(name, "m"u8);
     }
 
     private static bool IsExpires(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "Expires"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "Expires"u8);
     }
 
     private static bool IsVia(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "Via"u8) ||
-        Ascii.EqualsIgnoreCase(name, "v"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "Via"u8) ||
+        AsciiUtilities.EqualsIgnoreCase(name, "v"u8);
     }
 
     private static bool IsFrom(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "From"u8) ||
-        Ascii.EqualsIgnoreCase(name, "f"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "From"u8) ||
+        AsciiUtilities.EqualsIgnoreCase(name, "f"u8);
     }
 
     private static bool IsTo(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "To"u8) ||
-        Ascii.EqualsIgnoreCase(name, "t"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "To"u8) ||
+        AsciiUtilities.EqualsIgnoreCase(name, "t"u8);
     }
 
     private static bool IsCSeq(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "CSeq"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "CSeq"u8);
     }
 
     private static bool IsCallId(ReadOnlySpan<byte> name)
     {
-        return Ascii.EqualsIgnoreCase(name, "Call-ID"u8) ||
-        Ascii.EqualsIgnoreCase(name, "i"u8);
+        return AsciiUtilities.EqualsIgnoreCase(name, "Call-ID"u8) ||
+        AsciiUtilities.EqualsIgnoreCase(name, "i"u8);
     }
 
     /// <summary>

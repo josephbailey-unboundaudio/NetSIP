@@ -2,7 +2,9 @@ using System.Buffers;
 
 namespace NetSIP;
 
-/// <summary>Finds complete SIP messages in a possibly segmented transport buffer.</summary>
+/// <summary>
+/// Finds complete SIP messages in a possibly segmented transport buffer.
+/// </summary>
 public static class SipMessageFramer
 {
     /// <summary>
@@ -128,7 +130,7 @@ public static class SipMessageFramer
         SequenceReader<byte> reader = new(line);
 
         // A continuation line cannot introduce a new Content-Length field.
-        if (!reader.TryPeek(out byte first) || Ascii.IsOptionalWhitespace(first))
+        if (!reader.TryPeek(out byte first) || AsciiUtilities.IsOptionalWhitespace(first))
         {
             return true;
         }
@@ -179,7 +181,7 @@ public static class SipMessageFramer
         {
             foreach (byte value in segment.Span)
             {
-                if (!Ascii.IsTokenByte(value))
+                if (!AsciiUtilities.IsTokenByte(value))
                 {
                     return false;
                 }
@@ -271,7 +273,7 @@ public static class SipMessageFramer
         {
             foreach (byte current in segment.Span)
             {
-                if (Ascii.IsOptionalWhitespace(current))
+                if (AsciiUtilities.IsOptionalWhitespace(current))
                 {
                     if (sawDigit)
                     {

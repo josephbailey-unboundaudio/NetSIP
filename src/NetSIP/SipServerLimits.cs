@@ -1,6 +1,8 @@
 namespace NetSIP;
 
-/// <summary>Defines protocol and connection limits enforced by the server.</summary>
+/// <summary>
+/// Defines protocol and connection limits enforced by the server.
+/// </summary>
 public sealed class SipServerLimits
 {
     /// <summary>

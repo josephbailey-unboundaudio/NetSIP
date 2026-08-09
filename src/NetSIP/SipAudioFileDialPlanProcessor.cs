@@ -11,147 +11,6 @@ using System.Text;
 
 namespace NetSIP;
 
-/// <summary>Configures one-shot WAV playback for a SIP dialplan extension.</summary>
-public sealed class SipAudioFilePlaybackOptions
-{
-    /// <summary>Gets the local WAV file loaded and transcoded during construction.</summary>
-    public required string AudioFilePath { get; init; }
-
-    /// <summary>Gets the request-URI user routed to playback. The default is *86.</summary>
-    public string Extension { get; init; } = "*86";
-
-    /// <summary>Gets the complete Contact value returned by a successful INVITE.</summary>
-    public required string Contact { get; init; }
-
-    /// <summary>Gets the local unicast address used to bind RTP sockets.</summary>
-    public required IPAddress BindAddress { get; init; }
-
-    /// <summary>Gets the unicast address advertised in the SDP answer.</summary>
-    public required IPAddress AdvertisedAddress { get; init; }
-
-    /// <summary>Gets the maximum number of concurrent playback sessions.</summary>
-    public int MaxConcurrentSessions { get; init; } = 16;
-
-    /// <summary>Gets the maximum accepted WAV file size. The default is 16 MiB.</summary>
-    public int MaxAudioFileBytes { get; init; } = 16 * 1024 * 1024;
-
-    /// <summary>Gets the maximum transcoded playback duration. The default is five minutes.</summary>
-    public TimeSpan MaxPlaybackDuration { get; init; } = TimeSpan.FromMinutes(5);
-
-    /// <summary>
-    /// Gets the delay before sending the first RTP packet, allowing the buffered 200 response
-    /// to reach the caller. The default is 100 milliseconds.
-    /// </summary>
-    public TimeSpan StartDelay { get; init; } = TimeSpan.FromMilliseconds(100);
-
-    /// <summary>
-    /// Gets whether the SDP media address must equal the signaling peer address.
-    /// This secure default prevents the server from reflecting RTP to a third party.
-    /// </summary>
-    public bool RequireMediaAddressMatchSignalingPeer { get; init; } = true;
-
-    internal void Validate()
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(AudioFilePath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(Extension);
-        ArgumentException.ThrowIfNullOrWhiteSpace(Contact);
-        ArgumentNullException.ThrowIfNull(BindAddress);
-        ArgumentNullException.ThrowIfNull(AdvertisedAddress);
-        if (!IsVisibleAscii(Extension) ||
-            Extension.IndexOfAny(['@', ';', '?']) >= 0)
-        {
-            throw new ArgumentException(
-                "The playback extension must contain visible request-URI user characters.",
-                nameof(Extension));
-        }
-
-        if (!IsSafeHeaderValue(Contact))
-        {
-            throw new ArgumentException(
-                "The playback Contact must contain safe printable ASCII.",
-                nameof(Contact));
-        }
-
-        if (BindAddress.AddressFamily != AdvertisedAddress.AddressFamily ||
-            !IsUnicastOrAny(BindAddress) ||
-            !IsUnicast(AdvertisedAddress))
-        {
-            throw new ArgumentException(
-                "RTP bind and advertised addresses must use the same family and the advertised address must be unicast.");
-        }
-
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxConcurrentSessions);
-        if (MaxAudioFileBytes is < 44 or > 256 * 1024 * 1024)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(MaxAudioFileBytes),
-                "MaxAudioFileBytes must be between 44 bytes and 256 MiB.");
-        }
-
-        if (MaxPlaybackDuration < TimeSpan.FromMilliseconds(20) ||
-            MaxPlaybackDuration > TimeSpan.FromHours(1))
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(MaxPlaybackDuration),
-                "MaxPlaybackDuration must be between 20 milliseconds and one hour.");
-        }
-
-        if (StartDelay < TimeSpan.Zero || StartDelay > TimeSpan.FromSeconds(5))
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(StartDelay),
-                "StartDelay must be between zero and five seconds.");
-        }
-    }
-
-    private static bool IsVisibleAscii(string value)
-    {
-        foreach (char current in value)
-        {
-            if (current is < '!' or > '~')
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static bool IsSafeHeaderValue(string value)
-    {
-        foreach (char current in value)
-        {
-            if (current is < ' ' or > '~')
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static bool IsUnicastOrAny(IPAddress address)
-    {
-        return address.Equals(IPAddress.Any) ||
-            address.Equals(IPAddress.IPv6Any) ||
-            IsUnicast(address);
-    }
-
-    internal static bool IsUnicast(IPAddress address)
-    {
-        if (address.Equals(IPAddress.Any) ||
-            address.Equals(IPAddress.IPv6Any) ||
-            address.Equals(IPAddress.Broadcast) ||
-            address.IsIPv6Multicast)
-        {
-            return false;
-        }
-
-        byte[] bytes = address.GetAddressBytes();
-        return address.AddressFamily != AddressFamily.InterNetwork ||
-            bytes[0] is < 224 or > 239;
-    }
-}
 
 /// <summary>
 /// Routes one extension to a validated WAV file streamed as PCMU RTP and delegates all
@@ -549,24 +408,24 @@ public sealed class SipAudioFileDialPlanProcessor : ISipDialPlanProcessor, IAsyn
         out SdpDirection direction)
     {
         direction = SdpDirection.SendReceive;
-        if (Ascii.EqualsIgnoreCase(line, "a=sendrecv"u8))
+        if (AsciiUtilities.EqualsIgnoreCase(line, "a=sendrecv"u8))
         {
             return true;
         }
 
-        if (Ascii.EqualsIgnoreCase(line, "a=sendonly"u8))
+        if (AsciiUtilities.EqualsIgnoreCase(line, "a=sendonly"u8))
         {
             direction = SdpDirection.SendOnly;
             return true;
         }
 
-        if (Ascii.EqualsIgnoreCase(line, "a=recvonly"u8))
+        if (AsciiUtilities.EqualsIgnoreCase(line, "a=recvonly"u8))
         {
             direction = SdpDirection.ReceiveOnly;
             return true;
         }
 
-        if (Ascii.EqualsIgnoreCase(line, "a=inactive"u8))
+        if (AsciiUtilities.EqualsIgnoreCase(line, "a=inactive"u8))
         {
             direction = SdpDirection.Inactive;
             return true;
@@ -582,8 +441,8 @@ public sealed class SipAudioFileDialPlanProcessor : ISipDialPlanProcessor, IAsyn
         while (headers.MoveNext())
         {
             SipHeaderView header = headers.Current;
-            if (!Ascii.EqualsIgnoreCase(header.Name, "Content-Type"u8) &&
-                !Ascii.EqualsIgnoreCase(header.Name, "c"u8))
+            if (!AsciiUtilities.EqualsIgnoreCase(header.Name, "Content-Type"u8) &&
+                !AsciiUtilities.EqualsIgnoreCase(header.Name, "c"u8))
             {
                 continue;
             }
@@ -593,10 +452,10 @@ public sealed class SipAudioFileDialPlanProcessor : ISipDialPlanProcessor, IAsyn
             int parameters = value.IndexOf((byte)';');
             if (parameters >= 0)
             {
-                value = Ascii.TrimOptionalWhitespace(value[..parameters]);
+                value = AsciiUtilities.TrimOptionalWhitespace(value[..parameters]);
             }
 
-            if (!Ascii.EqualsIgnoreCase(value, "application/sdp"u8))
+            if (!AsciiUtilities.EqualsIgnoreCase(value, "application/sdp"u8))
             {
                 return false;
             }
@@ -615,9 +474,9 @@ public sealed class SipAudioFileDialPlanProcessor : ISipDialPlanProcessor, IAsyn
         port = 0;
         hasPcmu = false;
         if (tokenCount < 4 ||
-            !Ascii.EqualsIgnoreCase(value[tokens[0]], "audio"u8) ||
+            !AsciiUtilities.EqualsIgnoreCase(value[tokens[0]], "audio"u8) ||
             !TryParsePort(value[tokens[1]], out port) ||
-            !Ascii.EqualsIgnoreCase(value[tokens[2]], "RTP/AVP"u8))
+            !AsciiUtilities.EqualsIgnoreCase(value[tokens[2]], "RTP/AVP"u8))
         {
             return false;
         }
@@ -642,17 +501,17 @@ public sealed class SipAudioFileDialPlanProcessor : ISipDialPlanProcessor, IAsyn
         int tokenCount = SplitOnWhitespace(value, tokens);
         address = null;
         if (tokenCount != 3 ||
-            !Ascii.EqualsIgnoreCase(value[tokens[0]], "IN"u8))
+            !AsciiUtilities.EqualsIgnoreCase(value[tokens[0]], "IN"u8))
         {
             return false;
         }
 
         AddressFamily family;
-        if (Ascii.EqualsIgnoreCase(value[tokens[1]], "IP4"u8))
+        if (AsciiUtilities.EqualsIgnoreCase(value[tokens[1]], "IP4"u8))
         {
             family = AddressFamily.InterNetwork;
         }
-        else if (Ascii.EqualsIgnoreCase(value[tokens[1]], "IP6"u8))
+        else if (AsciiUtilities.EqualsIgnoreCase(value[tokens[1]], "IP6"u8))
         {
             family = AddressFamily.InterNetworkV6;
         }
@@ -677,7 +536,7 @@ public sealed class SipAudioFileDialPlanProcessor : ISipDialPlanProcessor, IAsyn
         int index = 0;
         while (index < value.Length)
         {
-            while (index < value.Length && Ascii.IsOptionalWhitespace(value[index]))
+            while (index < value.Length && AsciiUtilities.IsOptionalWhitespace(value[index]))
             {
                 index++;
             }
@@ -688,7 +547,7 @@ public sealed class SipAudioFileDialPlanProcessor : ISipDialPlanProcessor, IAsyn
             }
 
             int start = index;
-            while (index < value.Length && !Ascii.IsOptionalWhitespace(value[index]))
+            while (index < value.Length && !AsciiUtilities.IsOptionalWhitespace(value[index]))
             {
                 index++;
             }
@@ -780,189 +639,3 @@ public sealed class SipAudioFileDialPlanProcessor : ISipDialPlanProcessor, IAsyn
     }
 }
 
-internal static class WavPcmuTranscoder
-{
-    private const ushort PcmFormat = 1;
-    private const ushort MuLawFormat = 7;
-    private const int OutputSampleRate = 8000;
-
-    public static byte[] Transcode(ReadOnlySpan<byte> wav, int maxOutputSamples)
-    {
-        if (wav.Length < 12 ||
-            !wav[..4].SequenceEqual("RIFF"u8) ||
-            !wav.Slice(8, 4).SequenceEqual("WAVE"u8))
-        {
-            throw new InvalidDataException("Playback audio must be a RIFF WAVE file.");
-        }
-
-        ReadOnlySpan<byte> format = default;
-        ReadOnlySpan<byte> data = default;
-        int offset = 12;
-        while (offset <= wav.Length - 8)
-        {
-            ReadOnlySpan<byte> chunkId = wav.Slice(offset, 4);
-            uint chunkLength = BinaryPrimitives.ReadUInt32LittleEndian(wav.Slice(offset + 4, 4));
-            int contentOffset = offset + 8;
-            if (chunkLength > int.MaxValue ||
-                contentOffset > wav.Length - (int)chunkLength)
-            {
-                throw new InvalidDataException("The WAV file contains a truncated chunk.");
-            }
-
-            ReadOnlySpan<byte> content = wav.Slice(contentOffset, (int)chunkLength);
-            if (chunkId.SequenceEqual("fmt "u8) && format.IsEmpty)
-            {
-                format = content;
-            }
-            else if (chunkId.SequenceEqual("data"u8) && data.IsEmpty)
-            {
-                data = content;
-            }
-
-            // RIFF chunks are word-aligned; the padding byte is not part of chunkLength.
-            offset = checked(contentOffset + (int)chunkLength + ((int)chunkLength & 1));
-        }
-
-        if (format.Length < 16 || data.IsEmpty)
-        {
-            throw new InvalidDataException("The WAV file requires fmt and non-empty data chunks.");
-        }
-
-        ushort encoding = BinaryPrimitives.ReadUInt16LittleEndian(format);
-        ushort channels = BinaryPrimitives.ReadUInt16LittleEndian(format[2..]);
-        int sampleRate = BinaryPrimitives.ReadInt32LittleEndian(format[4..]);
-        ushort blockAlign = BinaryPrimitives.ReadUInt16LittleEndian(format[12..]);
-        ushort bitsPerSample = BinaryPrimitives.ReadUInt16LittleEndian(format[14..]);
-        if (encoding == MuLawFormat)
-        {
-            ValidateMuLawFormat(channels, sampleRate, bitsPerSample, blockAlign);
-            return data.Length <= maxOutputSamples
-                ? data.ToArray()
-                : throw new InvalidDataException("The WAV file exceeds MaxPlaybackDuration.");
-        }
-
-        if (encoding != PcmFormat ||
-            channels is < 1 or > 2 ||
-            sampleRate is < 8000 or > 48000 ||
-            bitsPerSample is not (8 or 16) ||
-            blockAlign != channels * (bitsPerSample / 8))
-        {
-            throw new InvalidDataException(
-                "PCM WAV input must be mono or stereo, 8-48 kHz, and 8 or 16 bits per sample.");
-        }
-
-        int frameCount = data.Length / blockAlign;
-        if (data.Length % blockAlign != 0)
-        {
-            throw new InvalidDataException("The PCM data chunk does not contain complete sample frames.");
-        }
-
-        int outputSamples = checked((int)Math.Ceiling(
-            frameCount * (double)OutputSampleRate / sampleRate));
-        if (outputSamples == 0 || outputSamples > maxOutputSamples)
-        {
-            throw new InvalidDataException("The WAV file is empty or exceeds MaxPlaybackDuration.");
-        }
-
-        byte[] output = new byte[outputSamples];
-        for (int outputIndex = 0; outputIndex < output.Length; outputIndex++)
-        {
-            // Nearest-neighbor resampling is deterministic and sufficient for narrowband prompts.
-            int sourceFrame = Math.Min(
-                frameCount - 1,
-                (int)((long)outputIndex * sampleRate / OutputSampleRate));
-            int frameOffset = sourceFrame * blockAlign;
-            int mixed = 0;
-            for (int channel = 0; channel < channels; channel++)
-            {
-                int sampleOffset = frameOffset + (channel * (bitsPerSample / 8));
-                mixed += bitsPerSample == 16
-                    ? BinaryPrimitives.ReadInt16LittleEndian(data[sampleOffset..])
-                    : (data[sampleOffset] - 128) << 8;
-            }
-
-            output[outputIndex] = LinearPcmToMuLaw((short)(mixed / channels));
-        }
-
-        return output;
-    }
-
-    private static void ValidateMuLawFormat(
-        ushort channels,
-        int sampleRate,
-        ushort bitsPerSample,
-        ushort blockAlign)
-    {
-        if (channels != 1 ||
-            sampleRate != OutputSampleRate ||
-            bitsPerSample != 8 ||
-            blockAlign != 1)
-        {
-            throw new InvalidDataException(
-                "G.711 mu-law WAV input must be mono, 8 kHz, and 8 bits per sample.");
-        }
-    }
-
-    private static byte LinearPcmToMuLaw(short value)
-    {
-        const int bias = 0x84;
-        const int clip = 32635;
-        int sample = value;
-        int sign = sample < 0 ? 0x80 : 0;
-        if (sample < 0)
-        {
-            sample = -sample;
-        }
-
-        sample = Math.Min(sample, clip) + bias;
-        int exponent = 7;
-        for (int mask = 0x4000; (sample & mask) == 0 && exponent > 0; mask >>= 1)
-        {
-            exponent--;
-        }
-
-        int mantissa = (sample >> (exponent + 3)) & 0x0f;
-        return (byte)~(sign | (exponent << 4) | mantissa);
-    }
-}
-
-internal static partial class SipAudioPlaybackLog
-{
-    [LoggerMessage(
-        20,
-        LogLevel.Warning,
-        "Unable to create RTP playback session for {RemoteMedia}")]
-    public static partial void SessionSetupFailed(
-        ILogger logger,
-        EndPoint remoteMedia,
-        Exception exception);
-
-    [LoggerMessage(
-        21,
-        LogLevel.Debug,
-        "RTP playback session {SessionId} to {RemoteMedia} sent {SampleCount} samples")]
-    public static partial void SessionCompleted(
-        ILogger logger,
-        long sessionId,
-        EndPoint remoteMedia,
-        int sampleCount);
-
-    [LoggerMessage(
-        22,
-        LogLevel.Debug,
-        "RTP playback session {SessionId} to {RemoteMedia} was canceled")]
-    public static partial void SessionCanceled(
-        ILogger logger,
-        long sessionId,
-        EndPoint remoteMedia);
-
-    [LoggerMessage(
-        23,
-        LogLevel.Warning,
-        "RTP playback session {SessionId} to {RemoteMedia} failed")]
-    public static partial void SessionTransportFailed(
-        ILogger logger,
-        long sessionId,
-        EndPoint remoteMedia,
-        Exception exception);
-}

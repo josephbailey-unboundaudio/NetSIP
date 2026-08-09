@@ -1,6 +1,8 @@
 namespace NetSIP;
 
-/// <summary>Parses complete SIP messages directly from bytes without allocating.</summary>
+/// <summary>
+/// Parses complete SIP messages directly from bytes without allocating.
+/// </summary>
 public static class SipParser
 {
     /// <summary>
@@ -120,7 +122,7 @@ public static class SipParser
             }
 
             // Reject folding so security-sensitive consumers see one unambiguous field per line.
-            if (Ascii.IsOptionalWhitespace(line[0]))
+            if (AsciiUtilities.IsOptionalWhitespace(line[0]))
             {
                 view = default;
                 error = SipParseError.MalformedHeader;
@@ -138,7 +140,7 @@ public static class SipParser
             }
 
             ReadOnlySpan<byte> name = line[..colon];
-            if (Ascii.EqualsIgnoreCase(name, "Content-Length"u8) || Ascii.EqualsIgnoreCase(name, "l"u8))
+            if (AsciiUtilities.EqualsIgnoreCase(name, "Content-Length"u8) || AsciiUtilities.EqualsIgnoreCase(name, "l"u8))
             {
                 if (!TryParseContentLength(line[(colon + 1)..], out int parsedLength) ||
                     (contentLengthSeen && parsedLength != contentLength))
@@ -309,7 +311,7 @@ public static class SipParser
 
         foreach (byte value in name)
         {
-            if (!Ascii.IsTokenByte(value))
+            if (!AsciiUtilities.IsTokenByte(value))
             {
                 return false;
             }
@@ -345,7 +347,7 @@ public static class SipParser
     /// <returns>true if the value was successfully parsed; otherwise, false.</returns>
     private static bool TryParseContentLength(ReadOnlySpan<byte> value, out int result)
     {
-        value = Ascii.TrimOptionalWhitespace(value);
+        value = AsciiUtilities.TrimOptionalWhitespace(value);
         if (value.IsEmpty)
         {
             result = 0;

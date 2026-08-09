@@ -624,7 +624,7 @@ static async Task TlsServerAuthenticatesInviteAndRegister()
     ISipRequestHandler application = new DefaultSipRequestHandler(
         new RegisterSipRequestHandler(),
         new SipInviteRequestHandler(dialPlan));
-    InMemorySipDigestCredentialProvider credentials = new(
+    InMemorySipDigestCredentialsProvider credentials = new(
         realm,
         [new KeyValuePair<string, string>(userName, password)]);
     SipDigestAuthenticationHandler authenticated = new(
@@ -633,7 +633,7 @@ static async Task TlsServerAuthenticatesInviteAndRegister()
         new SipDigestAuthenticationOptions
         {
             Realm = realm,
-            Algorithms = SipDigestAlgorithms.Sha256 | SipDigestAlgorithms.Md5,
+            Algorithms = SipDigestAlgorithmFlags.Sha256 | SipDigestAlgorithmFlags.Md5,
             NonceLifetime = TimeSpan.FromMinutes(1),
             MaxTrackedAuthentications = 2
         },

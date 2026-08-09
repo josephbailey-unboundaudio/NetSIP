@@ -106,7 +106,7 @@ if (digestUserName is not null || digestPassword is not null)
         Environment.GetEnvironmentVariable("NETSIP_DIGEST_ALLOW_MD5"),
         "true",
         StringComparison.OrdinalIgnoreCase);
-    InMemorySipDigestCredentialProvider credentials = new(
+    InMemorySipDigestCredentialsProvider credentials = new(
         digestRealm,
         [new KeyValuePair<string, string>(digestUserName, digestPassword)]);
     applicationHandler = new SipDigestAuthenticationHandler(
@@ -116,8 +116,8 @@ if (digestUserName is not null || digestPassword is not null)
         {
             Realm = digestRealm,
             Algorithms = allowMd5
-                ? SipDigestAlgorithms.Sha256 | SipDigestAlgorithms.Md5
-                : SipDigestAlgorithms.Sha256
+                ? SipDigestAlgorithmFlags.Sha256 | SipDigestAlgorithmFlags.Md5
+                : SipDigestAlgorithmFlags.Sha256
         });
 }
 
