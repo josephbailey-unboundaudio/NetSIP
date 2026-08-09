@@ -732,6 +732,20 @@ static string RegisterRequest(
     "Content-Length: 0\r\n\r\n";
 }
 
+static string RegisterRequest(
+    string registrationHeaders,
+    int cseq = 2,
+    string addressOfRecord = "sip:alice@example.com",
+    string callId = "register@example.com") =>
+    "REGISTER sip:example.com SIP/2.0\r\n" +
+    "Via: SIP/2.0/TLS client.example.com;branch=z9hG4bK-register\r\n" +
+    $"From: <{addressOfRecord}>;tag=register-client\r\n" +
+    $"To: <{addressOfRecord}>\r\n" +
+    $"Call-ID: {callId}\r\n" +
+    $"CSeq: {cseq} REGISTER\r\n" +
+    registrationHeaders +
+    "Content-Length: 0\r\n\r\n";
+
 static X509Certificate2 CreateServerCertificate()
 {
     using X509Certificate2 ephemeral = CreateEphemeralServerCertificate();
