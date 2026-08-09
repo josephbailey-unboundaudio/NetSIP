@@ -29,29 +29,37 @@ public enum SipDigestAlgorithms
     /// <summary>SHA-256 is enabled and preferred.</summary>
     Sha256 = 1,
 
-    /// <summary>Legacy MD5 is enabled for client interoperability.</summary>
+    /// <summary>Legacy MD5 is enabled for clients that cannot use SHA-256.</summary>
     Md5 = 2
 }
 
 /// <summary>Configures SIP Digest authentication.</summary>
 public sealed class SipDigestAuthenticationOptions
 {
-    /// <summary>Gets the authentication realm advertised to clients.</summary>
+    /// <summary>
+    /// Gets the printable ASCII authentication realm advertised to clients.
+    /// Quote and backslash are not permitted.
+    /// </summary>
     public required string Realm { get; init; }
 
-    /// <summary>Gets the lifetime of an issued nonce.</summary>
+    /// <summary>Gets the nonce lifetime, from one second through 24 hours.</summary>
     public TimeSpan NonceLifetime { get; init; } = TimeSpan.FromMinutes(5);
 
-    /// <summary>Gets the maximum number of successful nonce/user replay records.</summary>
+    /// <summary>
+    /// Gets the maximum live nonce/user replay records. Authentication fails closed
+    /// when this capacity is occupied until an entry expires.
+    /// </summary>
     public int MaxTrackedAuthentications { get; init; } = 4096;
 
-    /// <summary>Gets the maximum accepted Authorization header size.</summary>
+    /// <summary>Gets the maximum accepted Authorization field-value size in bytes.</summary>
     public int MaxAuthorizationHeaderBytes { get; init; } = 4096;
 
     /// <summary>Gets the maximum UTF-8 username size.</summary>
     public int MaxUserNameBytes { get; init; } = 256;
 
-    /// <summary>Gets the enabled algorithms. SHA-256 is the secure default.</summary>
+    /// <summary>
+    /// Gets the advertised algorithms. SHA-256 is the secure default; MD5 is legacy-only.
+    /// </summary>
     public SipDigestAlgorithms Algorithms { get; init; } = SipDigestAlgorithms.Sha256;
 
     internal void Validate()
@@ -260,6 +268,7 @@ public sealed class InMemorySipDigestCredentialProvider : ISipDigestCredentialPr
 
 /// <summary>
 /// Authenticates selected SIP methods with Digest before delegating to another handler.
+/// Authorization parsing and cryptographic work allocate outside the parser hot-path guarantee.
 /// </summary>
 public sealed class SipDigestAuthenticationHandler : ISipRequestHandler
 {

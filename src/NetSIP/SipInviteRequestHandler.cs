@@ -3,7 +3,9 @@ using System.Text;
 
 namespace NetSIP;
 
-/// <summary>A borrowed INVITE context valid only while the processor call is active.</summary>
+/// <summary>
+/// Exposes borrowed INVITE data that remains valid only until the dialplan call completes.
+/// </summary>
 public readonly struct SipInviteContext
 {
     private readonly SipRequestContext _requestContext;
@@ -52,19 +54,19 @@ public readonly struct SipDialPlanResult
         ContentType = contentType;
     }
 
-    /// <summary>Gets the final SIP status code.</summary>
+    /// <summary>Gets the final SIP status code in the range 200 through 699.</summary>
     public int StatusCode { get; }
 
-    /// <summary>Gets the reason phrase bytes.</summary>
+    /// <summary>Gets the owned reason phrase bytes.</summary>
     public ReadOnlyMemory<byte> ReasonPhrase { get; }
 
-    /// <summary>Gets the Contact header value for successful or redirect responses.</summary>
+    /// <summary>Gets the owned Contact header value for successful or redirect responses.</summary>
     public ReadOnlyMemory<byte> Contact { get; }
 
-    /// <summary>Gets the optional response body.</summary>
+    /// <summary>Gets the optional owned response body.</summary>
     public ReadOnlyMemory<byte> Body { get; }
 
-    /// <summary>Gets the Content-Type header value for the response body.</summary>
+    /// <summary>Gets the owned Content-Type value required by a non-empty body.</summary>
     public ReadOnlyMemory<byte> ContentType { get; }
 
     internal bool IsValid =>
@@ -77,6 +79,10 @@ public readonly struct SipDialPlanResult
         (StatusCode < 400 ? !Contact.IsEmpty : Contact.IsEmpty);
 
     /// <summary>Creates a 200 response with a Contact and optional body.</summary>
+    /// <param name="contact">The complete Contact header value.</param>
+    /// <param name="body">An optional response body, commonly SDP.</param>
+    /// <param name="contentType">The body media type; required when <paramref name="body"/> is non-empty.</param>
+    /// <returns>An owned 200 OK result.</returns>
     public static SipDialPlanResult Answer(
         ReadOnlyMemory<byte> contact,
         ReadOnlyMemory<byte> body = default,
@@ -86,6 +92,10 @@ public readonly struct SipDialPlanResult
     }
 
     /// <summary>Creates a redirect response with a Contact.</summary>
+    /// <param name="contact">The complete Contact header value for the redirect target.</param>
+    /// <param name="statusCode">A final 3xx status code.</param>
+    /// <param name="reasonPhrase">An optional owned reason phrase.</param>
+    /// <returns>An owned redirect result.</returns>
     public static SipDialPlanResult Redirect(
         ReadOnlyMemory<byte> contact,
         int statusCode = 302,
@@ -100,6 +110,9 @@ public readonly struct SipDialPlanResult
     }
 
     /// <summary>Creates a final rejection response without a Contact.</summary>
+    /// <param name="statusCode">A final status code from 400 through 699.</param>
+    /// <param name="reasonPhrase">The owned reason phrase.</param>
+    /// <returns>An owned rejection result.</returns>
     public static SipDialPlanResult Reject(
         int statusCode,
         ReadOnlyMemory<byte> reasonPhrase)
@@ -132,6 +145,10 @@ public sealed class SipDialPlanRule
     private readonly byte[] _prefix;
 
     /// <summary>Initializes a rule for a request-URI user prefix.</summary>
+    /// <param name="prefix">
+    /// A visible ASCII prefix. An empty prefix is a catch-all rule.
+    /// </param>
+    /// <param name="result">The final response selected by a match.</param>
     public SipDialPlanRule(string prefix, SipDialPlanResult result)
     {
         ArgumentNullException.ThrowIfNull(prefix);
@@ -157,6 +174,8 @@ public sealed class PrefixSipDialPlanProcessor : ISipDialPlanProcessor
     private readonly SipDialPlanResult _defaultResult;
 
     /// <summary>Initializes a longest-prefix dialplan.</summary>
+    /// <param name="rules">The rules to copy and order by descending prefix length.</param>
+    /// <param name="defaultResult">The result used when no rule matches.</param>
     public PrefixSipDialPlanProcessor(
         IEnumerable<SipDialPlanRule> rules,
         SipDialPlanResult defaultResult)
@@ -181,7 +200,7 @@ public sealed class PrefixSipDialPlanProcessor : ISipDialPlanProcessor
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        ReadOnlySpan<byte> user = GetRequestUriUser(context.Request.RequestUri);
+        ReadOnlySpan<byte> user = SipUri.GetUser(context.Request.RequestUri);
         foreach (SipDialPlanRule rule in _rules)
         {
             if (user.StartsWith(rule.Prefix))
@@ -193,7 +212,15 @@ public sealed class PrefixSipDialPlanProcessor : ISipDialPlanProcessor
         return ValueTask.FromResult(_defaultResult);
     }
 
-    private static ReadOnlySpan<byte> GetRequestUriUser(ReadOnlySpan<byte> uri)
+}
+
+internal static class SipUri
+{
+    /// <summary>
+    /// Returns the borrowed user component for SIP/SIPS URIs or the subscriber
+    /// component for tel URIs. Host-only and unsupported URIs return an empty span.
+    /// </summary>
+    public static ReadOnlySpan<byte> GetUser(ReadOnlySpan<byte> uri)
     {
         int colon = uri.IndexOf((byte)':');
         if (colon < 0 || colon == uri.Length - 1)
@@ -227,6 +254,7 @@ public sealed class SipInviteRequestHandler : ISipRequestHandler
     private readonly ISipDialPlanProcessor _dialPlan;
 
     /// <summary>Initializes an INVITE handler with the supplied dialplan.</summary>
+    /// <param name="dialPlan">The processor invoked after structural request validation.</param>
     public SipInviteRequestHandler(ISipDialPlanProcessor dialPlan)
     {
         ArgumentNullException.ThrowIfNull(dialPlan);

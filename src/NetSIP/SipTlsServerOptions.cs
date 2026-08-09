@@ -39,12 +39,13 @@ public sealed class SipTlsServerOptions
     public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// Gets or initializes the maximum time to wait for data on an idle connection.
+    /// Gets or initializes the maximum idle interval while awaiting more transport data.
     /// </summary>
     public TimeSpan ReadTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Gets or initializes the maximum time allowed for a request handler to complete.
+    /// Gets or initializes the cooperative deadline for a request handler invocation.
+    /// Handlers must observe the cancellation token supplied to them.
     /// </summary>
     public TimeSpan HandlerTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
@@ -66,13 +67,13 @@ public sealed class SipTlsServerOptions
         ValidateTimeout(HandlerTimeout, nameof(HandlerTimeout));
         Limits.Validate();
 
-        // Ensure certificate has a private key
+        // TLS server authentication requires access to the certificate's private key.
         if (!ServerCertificate.HasPrivateKey)
         {
             throw new ArgumentException("The server certificate must contain a private key.", nameof(ServerCertificate));
         }
 
-        // Ensure certificate is currently valid
+        // Reject obviously unusable certificates before opening the listener.
         DateTimeOffset now = DateTimeOffset.UtcNow;
         if (now < ServerCertificate.NotBefore || now > ServerCertificate.NotAfter)
         {

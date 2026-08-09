@@ -14,6 +14,12 @@ namespace NetSIP;
 /// </summary>
 public interface ISipRequestHandler
 {
+    /// <summary>Handles one borrowed SIP message.</summary>
+    /// <param name="context">
+    /// The reusable connection context. It and its message must not be retained.
+    /// </param>
+    /// <param name="cancellationToken">The cooperative handler deadline and shutdown token.</param>
+    /// <returns>An operation that completes after the handler has finished using borrowed data.</returns>
     ValueTask HandleAsync(SipRequestContext context, CancellationToken cancellationToken);
 }
 
@@ -147,6 +153,9 @@ public sealed class SipResponseWriter
     }
 
     /// <summary>Writes a successful REGISTER response containing the current bindings.</summary>
+    /// <param name="request">The REGISTER request whose transaction headers are preserved.</param>
+    /// <param name="bindings">The current owned bindings to serialize as Contact fields.</param>
+    /// <returns><see langword="true"/> when the request and bindings were valid and written.</returns>
     public bool WriteRegisterOk(
         SipMessageView request,
         ReadOnlySpan<SipRegistrationBinding> bindings)
@@ -164,6 +173,9 @@ public sealed class SipResponseWriter
     }
 
     /// <summary>Writes a REGISTER 423 response with the registrar's minimum expiration.</summary>
+    /// <param name="request">The REGISTER request whose transaction headers are preserved.</param>
+    /// <param name="minimumExpires">The positive minimum interval in seconds.</param>
+    /// <returns><see langword="true"/> when the response was written.</returns>
     public bool WriteRegisterIntervalTooBrief(SipMessageView request, int minimumExpires)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(minimumExpires);
@@ -179,6 +191,9 @@ public sealed class SipResponseWriter
     }
 
     /// <summary>Writes a final response selected by an INVITE dialplan.</summary>
+    /// <param name="request">The INVITE request whose transaction headers are preserved.</param>
+    /// <param name="result">The owned, validated dialplan result.</param>
+    /// <returns><see langword="true"/> when the request and result were valid and written.</returns>
     public bool WriteInviteResponse(
         SipMessageView request,
         SipDialPlanResult result)
@@ -247,6 +262,15 @@ public sealed class SipResponseWriter
     /// Writes a response that preserves the request's transaction and dialog headers.
     /// The supplied spans are consumed before this method returns.
     /// </summary>
+    /// <param name="statusCode">The response status from 100 through 699.</param>
+    /// <param name="reasonPhrase">The reason phrase, without line breaks.</param>
+    /// <param name="request">The request whose Via, From, To, Call-ID, and CSeq are reflected.</param>
+    /// <param name="body">An optional response body.</param>
+    /// <param name="contentType">The body media type, required for a non-empty body.</param>
+    /// <returns>
+    /// <see langword="true"/> when required safe transaction headers were available;
+    /// otherwise, <see langword="false"/>.
+    /// </returns>
     public bool WriteResponse(
         int statusCode,
         ReadOnlySpan<byte> reasonPhrase,
@@ -936,6 +960,7 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
     }
 
     /// <summary>Initializes a handler that supports OPTIONS and INVITE.</summary>
+    /// <param name="inviteHandler">The handler for INVITE requests.</param>
     public DefaultSipRequestHandler(SipInviteRequestHandler inviteHandler)
         : this(
             registerHandler: null,
@@ -944,6 +969,8 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
     }
 
     /// <summary>Initializes a handler with optional REGISTER and INVITE support.</summary>
+    /// <param name="registerHandler">The optional handler for REGISTER requests.</param>
+    /// <param name="inviteHandler">The optional handler for INVITE requests.</param>
     public DefaultSipRequestHandler(
         RegisterSipRequestHandler? registerHandler,
         SipInviteRequestHandler? inviteHandler)
@@ -958,13 +985,12 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
     /// </summary>
     /// <param name="context">The request context.</param>
     /// <param name="cancellationToken">Cancellation token for the operation.</param>
-    /// <returns>A completed task.</returns>
+    /// <returns>The selected handler operation.</returns>
     public ValueTask HandleAsync(SipRequestContext context, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         SipMessageView message = context.Message;
 
-        // Handle OPTIONS requests
         if (Ascii.EqualsIgnoreCase(message.Method, "OPTIONS"u8))
         {
             if (!context.Response.WriteOptionsOk(
@@ -975,7 +1001,6 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
                 context.Response.WriteError(400);
             }
         }
-        // Handle REGISTER requests if handler is configured
         else if (_registerHandler is not null &&
             Ascii.EqualsIgnoreCase(message.Method, "REGISTER"u8))
         {
@@ -986,7 +1011,6 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
         {
             return _inviteHandler.HandleAsync(context, cancellationToken);
         }
-        // Reject all other methods
         else if (!context.Response.WriteResponse(501, "Not Implemented"u8, message))
         {
             context.Response.WriteError(400);

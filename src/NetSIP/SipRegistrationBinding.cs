@@ -6,7 +6,7 @@ public readonly struct SipRegistrationBinding
     /// <summary>
     /// Initializes a new instance of the <see cref="SipRegistrationBinding"/> struct.
     /// </summary>
-    /// <param name="contact">The Contact URI for this binding.</param>
+    /// <param name="contact">The complete Contact header value for this binding.</param>
     /// <param name="expires">The remaining seconds until this binding expires.</param>
     /// <exception cref="ArgumentException">Thrown if contact is empty.</exception>
     /// <exception cref="ArgumentOutOfRangeException">Thrown if expires is negative.</exception>
@@ -23,7 +23,7 @@ public readonly struct SipRegistrationBinding
     }
 
     /// <summary>
-    /// Gets the Contact URI bytes for this binding.
+    /// Gets the complete Contact header value bytes for this binding.
     /// </summary>
     public ReadOnlyMemory<byte> Contact { get; }
 
