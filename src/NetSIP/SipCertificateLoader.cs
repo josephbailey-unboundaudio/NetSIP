@@ -5,20 +5,45 @@ namespace NetSIP;
 /// <summary>Certificate file configuration for PFX or PEM/private-key loading.</summary>
 public sealed class SipCertificateOptions
 {
+    /// <summary>
+    /// Gets or initializes the path to a PFX (PKCS#12) certificate file.
+    /// Mutually exclusive with PEM options.
+    /// </summary>
     public string? PfxPath { get; init; }
 
+    /// <summary>
+    /// Gets or initializes the password for the PFX file, if encrypted.
+    /// </summary>
     public string? PfxPassword { get; init; }
 
+    /// <summary>
+    /// Gets or initializes the path to a PEM-encoded certificate file.
+    /// Must be used with <see cref="PemPrivateKeyPath"/>.
+    /// </summary>
     public string? PemCertificatePath { get; init; }
 
+    /// <summary>
+    /// Gets or initializes the path to a PEM-encoded private key file.
+    /// Must be used with <see cref="PemCertificatePath"/>.
+    /// </summary>
     public string? PemPrivateKeyPath { get; init; }
 
+    /// <summary>
+    /// Gets or initializes the password for the encrypted PEM private key, if applicable.
+    /// </summary>
     public string? PemPrivateKeyPassword { get; init; }
 }
 
 /// <summary>Loads server certificates without logging certificate passwords or key material.</summary>
 public static class SipCertificateLoader
 {
+    /// <summary>
+    /// Loads an X.509 certificate with private key from either PFX or PEM files.
+    /// </summary>
+    /// <param name="options">The certificate file configuration.</param>
+    /// <returns>A loaded certificate with private key.</returns>
+    /// <exception cref="ArgumentNullException">Thrown if options is null.</exception>
+    /// <exception cref="ArgumentException">Thrown if the configuration is invalid or the certificate has no private key.</exception>
     public static X509Certificate2 Load(SipCertificateOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -27,6 +52,7 @@ public static class SipCertificateLoader
         bool hasPemCertificate = !string.IsNullOrWhiteSpace(options.PemCertificatePath);
         bool hasPemKey = !string.IsNullOrWhiteSpace(options.PemPrivateKeyPath);
 
+        // Validate that exactly one certificate source is configured
         if (hasPfx == hasPemCertificate || hasPemCertificate != hasPemKey)
         {
             throw new ArgumentException(
@@ -37,6 +63,7 @@ public static class SipCertificateLoader
         X509Certificate2 certificate;
         if (hasPfx)
         {
+            // Load PFX certificate
             certificate = X509CertificateLoader.LoadPkcs12FromFile(
                 Path.GetFullPath(options.PfxPath!),
                 options.PfxPassword,
@@ -44,6 +71,7 @@ public static class SipCertificateLoader
         }
         else
         {
+            // Load PEM certificate and private key
             X509Certificate2 pemCertificate = string.IsNullOrEmpty(options.PemPrivateKeyPassword)
                 ? X509Certificate2.CreateFromPemFile(
                     Path.GetFullPath(options.PemCertificatePath!),
@@ -53,6 +81,7 @@ public static class SipCertificateLoader
                     options.PemPrivateKeyPassword,
                     Path.GetFullPath(options.PemPrivateKeyPath!));
 
+            // On Windows, convert to PKCS#12 for better compatibility
             if (OperatingSystem.IsWindows())
             {
                 using (pemCertificate)
@@ -69,6 +98,7 @@ public static class SipCertificateLoader
             }
         }
 
+        // Validate that the certificate has a private key
         if (!certificate.HasPrivateKey)
         {
             certificate.Dispose();
@@ -78,8 +108,14 @@ public static class SipCertificateLoader
         return certificate;
     }
 
-    private static X509KeyStorageFlags GetKeyStorageFlags() =>
-        OperatingSystem.IsWindows()
+    /// <summary>
+    /// Gets the appropriate key storage flags based on the operating system.
+    /// Windows uses UserKeySet, while other platforms use EphemeralKeySet.
+    /// </summary>
+    private static X509KeyStorageFlags GetKeyStorageFlags()
+    {
+        return OperatingSystem.IsWindows()
             ? X509KeyStorageFlags.UserKeySet
             : X509KeyStorageFlags.EphemeralKeySet;
+    }
 }

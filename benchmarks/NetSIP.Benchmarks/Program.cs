@@ -1,6 +1,6 @@
+using NetSIP;
 using System.Diagnostics;
 using System.Text;
-using NetSIP;
 
 const int warmupIterations = 100_000;
 const int measuredIterations = 1_000_000;
@@ -13,7 +13,7 @@ byte[] request = Encoding.ASCII.GetBytes(
     "Call-ID: allocation-proof@example.com\r\n" +
     "CSeq: 1 OPTIONS\r\n" +
     "Content-Length: 0\r\n\r\n");
-var limits = new SipServerLimits();
+SipServerLimits limits = new();
 
 int checksum = Run(request, limits, warmupIterations);
 GC.Collect();

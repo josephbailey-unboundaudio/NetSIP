@@ -5,6 +5,13 @@
   <Folder Name="/samples/">
     <Project Path="samples/NetSIP.Sample/NetSIP.Sample.csproj" />
   </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path=".editorconfig" />
+    <File Path=".gitignore" />
+    <File Path="Directory.Build.props" />
+    <File Path="global.json" />
+    <File Path="README.md" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/NetSIP/NetSIP.csproj" />
   </Folder>

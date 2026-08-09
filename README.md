@@ -9,7 +9,7 @@ dependency-free test executable, and a deterministic allocation harness.
 | Project | Purpose |
 | --- | --- |
 | `src\NetSIP` | TLS server, streaming framer, parser, handlers, response writer, and certificate loader |
-| `samples\NetSIP.Sample` | Configuration-driven OPTIONS server |
+| `samples\NetSIP.Sample` | Configuration-driven OPTIONS/REGISTER/INVITE server |
 | `tests\NetSIP.Tests` | Unit and real-network TLS integration tests |
 | `benchmarks\NetSIP.Benchmarks` | Warmed parser throughput and allocation measurement |
 
@@ -93,15 +93,57 @@ await using var server = new SipTlsServer(
             MaxMessagesPerConnection = 10_000
         }
     },
-    new DefaultSipRequestHandler());
+    new DefaultSipRequestHandler(
+        new RegisterSipRequestHandler(),
+        new SipInviteRequestHandler(
+            new PrefixSipDialPlanProcessor(
+                [
+                    new SipDialPlanRule(
+                        "1",
+                        SipDialPlanResult.Redirect(
+                            "sips:gateway@example.com"u8.ToArray()))
+                ],
+                SipDialPlanResult.Reject(
+                    404,
+                    "Not Found"u8.ToArray())))));
 
 await server.StartAsync();
 ```
 
 `DefaultSipRequestHandler` returns `200 OK` for OPTIONS, copies every Via, and
-preserves From, To, Call-ID, and CSeq. It adds a unique To tag when the request
-does not contain one. Other methods receive a transaction-preserving
-`501 Not Implemented`.
+preserves From, To, Call-ID, and CSeq. Pass a `RegisterSipRequestHandler` to its
+constructor to opt into REGISTER; the parameterless default rejects REGISTER
+with `501 Not Implemented`. The REGISTER handler provides a bounded,
+process-local location store with binding queries, multiple Contact values,
+per-contact/global expiration, automatic expiry, `expires=0` removal, and
+wildcard removal. Successful responses enumerate current bindings with
+effective `expires` parameters. Intervals below the configured minimum receive
+`423 Interval Too Brief`; stale requests using a lower CSeq for the same
+Call-ID receive `500 Server Internal Error`. The store applies address,
+binding, Call-ID, per-contact-byte, and aggregate-byte limits.
+
+The built-in store is not durable and is intended for a single server process.
+Production registrars requiring shared persistence, replication, or custom
+authorization should implement `ISipRequestHandler` around their location
+service and call `SipResponseWriter.WriteRegisterOk` with the resulting
+`SipRegistrationBinding` set. REGISTER necessarily allocates owned binding
+state and is outside the zero-allocation parser guarantee.
+
+REGISTER is opt-in because the built-in handler does not authenticate requests.
+Configure `SipRegisterHandlerOptions` conservatively and place authentication
+and authorization ahead of it before exposing a registrar to untrusted peers.
+
+INVITE is also opt-in. `SipInviteRequestHandler` validates CSeq, Contact, and
+Max-Forwards before calling an `ISipDialPlanProcessor`. A
+`PrefixSipDialPlanProcessor` applies longest-prefix matching to the request-URI
+user and returns an owned `SipDialPlanResult`: `Answer` (200 with Contact and
+optional body), `Redirect` (3xx with Contact), or `Reject` (4xx-6xx).
+Custom processors may perform asynchronous routing lookups while the borrowed
+`SipInviteContext` remains valid only until `ProcessAsync` completes.
+
+The sample enables a catch-all INVITE dialplan. Set
+`NETSIP_INVITE_REDIRECT` to a safe SIP/SIPS contact URI to redirect calls;
+without it, INVITE receives `404 Not Found`.
 
 Custom handlers implement `ISipRequestHandler`. Response construction is
 synchronous and span-based; the server flushes after the handler completes:
@@ -144,7 +186,8 @@ non-finite timeouts. The server enforces:
 - maximum messages per connection and maximum concurrent connections;
 - TLS handshake, transport-read, and handler timeouts;
 - strict CRLF framing, valid header tokens, non-folded headers, numeric
-  `Content-Length`, and matching duplicate long/compact Content-Length values.
+  `Content-Length`, matching duplicate long/compact Content-Length values, and
+  REGISTER wildcard/CSeq rules.
 
 Malformed messages receive `400 Bad Request`; oversized messages receive
 `513 Message Too Large`. When enough of a valid request is available, error
@@ -153,8 +196,9 @@ close silently because no valid SIP transaction is available to receive a 408.
 Error responses are sent after TLS establishment when possible, then the
 connection is closed.
 
-NetSIP is a transport/parser, not a complete SIP proxy or registrar. It does
-not provide digest authentication, authorization, transaction/dialog storage,
+NetSIP is a transport/parser with a process-local registrar, not a complete SIP
+proxy or distributed registrar. It does not provide digest authentication,
+authorization, transaction/dialog or media-session storage, durable/shared location storage,
 rate limiting by identity, client-certificate authentication, certificate
 rotation, UDP, or WebSocket transport. Deploy behind appropriate network
 controls, use a publicly or privately trusted certificate, keep limits
