@@ -65,7 +65,7 @@ public sealed class SipResponseWriter
 
     internal bool CloseAfterFlush { get; private set; }
 
-    public bool WriteOptionsOk(SipMessageView request)
+    public bool WriteOptionsOk(SipMessageView request, bool allowRegister = false)
     {
         if (request.Kind != SipMessageKind.Request ||
             !Ascii.EqualsIgnoreCase(request.Method, "OPTIONS"u8))
@@ -79,7 +79,46 @@ public sealed class SipResponseWriter
             request,
             body: default,
             contentType: default,
-            "Allow: OPTIONS\r\n"u8);
+            allowRegister
+                ? ResponseHeaders.OptionsAndRegister
+                : ResponseHeaders.Options);
+    }
+
+    /// <summary>Writes a successful REGISTER response containing the current bindings.</summary>
+    public bool WriteRegisterOk(
+        SipMessageView request,
+        ReadOnlySpan<SipRegistrationBinding> bindings)
+    {
+        if (request.Kind != SipMessageKind.Request ||
+            !Ascii.EqualsIgnoreCase(request.Method, "REGISTER"u8) ||
+            !ValidateRegistrationBindings(bindings))
+        {
+            return false;
+        }
+
+        return WriteResponseCore(
+            200,
+            "OK"u8,
+            request,
+            body: default,
+            contentType: default,
+            ResponseHeaders.Register,
+            bindings);
+    }
+
+    /// <summary>Writes a REGISTER 423 response with the registrar's minimum expiration.</summary>
+    public bool WriteRegisterIntervalTooBrief(SipMessageView request, int minimumExpires)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(minimumExpires);
+        return WriteResponseCore(
+            423,
+            "Interval Too Brief"u8,
+            request,
+            body: default,
+            contentType: default,
+            ResponseHeaders.MinExpires,
+            bindings: default,
+            minimumExpires);
     }
 
     /// <summary>
@@ -99,7 +138,8 @@ public sealed class SipResponseWriter
             request,
             body,
             contentType,
-            extraHeaders: default);
+            ResponseHeaders.None,
+            bindings: default);
     }
 
     private bool WriteResponseCore(
@@ -108,7 +148,9 @@ public sealed class SipResponseWriter
         SipMessageView request,
         ReadOnlySpan<byte> body,
         ReadOnlySpan<byte> contentType,
-        ReadOnlySpan<byte> extraHeaders)
+        ResponseHeaders responseHeaders,
+        ReadOnlySpan<SipRegistrationBinding> bindings = default,
+        int minimumExpires = 0)
     {
         if (statusCode is < 100 or > 699)
         {
@@ -185,7 +227,7 @@ public sealed class SipResponseWriter
         WriteSingleHeader(request, HeaderKind.To, "To:"u8, generatedTag[..tagLength]);
         WriteSingleHeader(request, HeaderKind.CallId, "Call-ID:"u8, generatedTag[..tagLength]);
         WriteSingleHeader(request, HeaderKind.CSeq, "CSeq:"u8, generatedTag[..tagLength]);
-        Write(extraHeaders);
+        WriteAdditionalHeaders(responseHeaders, bindings, minimumExpires);
         if (!contentType.IsEmpty)
         {
             Write("Content-Type: "u8);
@@ -247,7 +289,8 @@ public sealed class SipResponseWriter
             request,
             body: default,
             contentType: default,
-            "Connection: close\r\n"u8);
+            ResponseHeaders.ConnectionClose,
+            bindings: default);
         CloseAfterFlush = written;
         return written;
     }
@@ -292,6 +335,64 @@ public sealed class SipResponseWriter
         Span<byte> destination = _writer.GetSpan(value.Length);
         value.CopyTo(destination);
         _writer.Advance(value.Length);
+    }
+
+    private void WriteAdditionalHeaders(
+        ResponseHeaders responseHeaders,
+        ReadOnlySpan<SipRegistrationBinding> bindings,
+        int minimumExpires)
+    {
+        switch (responseHeaders)
+        {
+            case ResponseHeaders.None:
+                return;
+            case ResponseHeaders.Options:
+                Write("Allow: OPTIONS\r\n"u8);
+                return;
+            case ResponseHeaders.OptionsAndRegister:
+                Write("Allow: OPTIONS, REGISTER\r\n"u8);
+                return;
+            case ResponseHeaders.ConnectionClose:
+                Write("Connection: close\r\n"u8);
+                return;
+            case ResponseHeaders.Register:
+                Span<byte> expiration = stackalloc byte[10];
+                foreach (SipRegistrationBinding binding in bindings)
+                {
+                    if (binding.Contact.IsEmpty || binding.Expires < 0)
+                    {
+                        throw new ArgumentException(
+                            "Registration bindings require a Contact value and non-negative expiration.",
+                            nameof(bindings));
+                    }
+
+                    Write("Contact: "u8);
+                    Write(binding.Contact.Span);
+                    Write(";expires="u8);
+                    if (!Utf8Formatter.TryFormat(binding.Expires, expiration, out int written))
+                    {
+                        throw new InvalidOperationException("Unable to format the binding expiration.");
+                    }
+
+                    Write(expiration[..written]);
+                    Write("\r\n"u8);
+                }
+
+                return;
+            case ResponseHeaders.MinExpires:
+                Write("Min-Expires: "u8);
+                Span<byte> minimum = stackalloc byte[10];
+                if (!Utf8Formatter.TryFormat(minimumExpires, minimum, out int minimumLength))
+                {
+                    throw new InvalidOperationException("Unable to format the minimum expiration.");
+                }
+
+                Write(minimum[..minimumLength]);
+                Write("\r\n"u8);
+                return;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(responseHeaders));
+        }
     }
 
     private static bool IsVia(ReadOnlySpan<byte> name) =>
@@ -407,6 +508,24 @@ public sealed class SipResponseWriter
         return true;
     }
 
+    private static bool ValidateRegistrationBindings(
+        ReadOnlySpan<SipRegistrationBinding> bindings)
+    {
+        foreach (SipRegistrationBinding binding in bindings)
+        {
+            ReadOnlySpan<byte> contact = binding.Contact.Span;
+            if (contact.IsEmpty ||
+                contact.SequenceEqual("*"u8) ||
+                binding.Expires < 0 ||
+                !IsSafeReflectedValue(contact))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static bool ContainsLineBreak(ReadOnlySpan<byte> value) =>
         value.IndexOfAny((byte)'\r', (byte)'\n') >= 0;
 
@@ -424,21 +543,50 @@ public sealed class SipResponseWriter
         CallId,
         CSeq
     }
+
+    private enum ResponseHeaders
+    {
+        None,
+        Options,
+        OptionsAndRegister,
+        Register,
+        MinExpires,
+        ConnectionClose
+    }
 }
 
-/// <summary>Responds to OPTIONS and rejects other methods with 501.</summary>
+/// <summary>Responds to OPTIONS and REGISTER, and rejects other methods with 501.</summary>
 public sealed class DefaultSipRequestHandler : ISipRequestHandler
 {
+    private readonly RegisterSipRequestHandler? _registerHandler;
+
+    public DefaultSipRequestHandler()
+    {
+    }
+
+    public DefaultSipRequestHandler(RegisterSipRequestHandler registerHandler)
+    {
+        ArgumentNullException.ThrowIfNull(registerHandler);
+        _registerHandler = registerHandler;
+    }
+
     public ValueTask HandleAsync(SipRequestContext context, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         SipMessageView message = context.Message;
         if (Ascii.EqualsIgnoreCase(message.Method, "OPTIONS"u8))
         {
-            if (!context.Response.WriteOptionsOk(message))
+            if (!context.Response.WriteOptionsOk(
+                    message,
+                    allowRegister: _registerHandler is not null))
             {
                 context.Response.WriteError(400);
             }
+        }
+        else if (_registerHandler is not null &&
+            Ascii.EqualsIgnoreCase(message.Method, "REGISTER"u8))
+        {
+            _registerHandler.Handle(context, message);
         }
         else if (!context.Response.WriteResponse(501, "Not Implemented"u8, message))
         {

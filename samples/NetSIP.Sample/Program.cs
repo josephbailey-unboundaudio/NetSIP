@@ -49,7 +49,7 @@ await using var server = new SipTlsServer(
         ListenEndPoint = new IPEndPoint(address, port),
         ServerCertificate = certificate
     },
-    new DefaultSipRequestHandler(),
+    new DefaultSipRequestHandler(new RegisterSipRequestHandler()),
     logger);
 
 using var shutdown = new CancellationTokenSource();
