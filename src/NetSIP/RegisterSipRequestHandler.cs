@@ -8,17 +8,17 @@ public sealed class SipRegisterHandlerOptions
     /// <summary>
     /// Gets or initializes the default expiration time in seconds for registrations.
     /// </summary>
-    public int DefaultExpirationSeconds { get; init; } = 3600;
+    public int DefaultExpirationSeconds { get; init; } = 180;
 
     /// <summary>
     /// Gets or initializes the minimum allowed expiration time in seconds.
     /// </summary>
-    public int MinimumExpirationSeconds { get; init; } = 60;
+    public int MinimumExpirationSeconds { get; init; } = 90;
 
     /// <summary>
     /// Gets or initializes the maximum allowed expiration time in seconds.
     /// </summary>
-    public int MaximumExpirationSeconds { get; init; } = 86_400;
+    public int MaximumExpirationSeconds { get; init; } = 300;
 
     /// <summary>
     /// Gets or initializes the maximum number of addresses of record that can be stored.
