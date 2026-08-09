@@ -15,6 +15,12 @@ if (args.Length == 0 || Array.IndexOf(args, "--help") >= 0)
 
         Password environment variables default to NETSIP_PFX_PASSWORD and
         NETSIP_PEM_KEY_PASSWORD. Passwords and private-key material are never logged.
+        Set NETSIP_DIGEST_USERNAME and NETSIP_DIGEST_PASSWORD to protect REGISTER
+        and INVITE. NETSIP_DIGEST_REALM defaults to NetSIP. Set
+        NETSIP_DIGEST_ALLOW_MD5=true only for legacy client interoperability.
+        Set NETSIP_STAR86_WAV and NETSIP_RTP_ADDRESS to answer *86 and stream the
+        WAV file as PCMU RTP. NETSIP_RTP_BIND_ADDRESS and NETSIP_STAR86_CONTACT
+        are optional overrides.
         """);
     return;
 }
@@ -48,8 +54,72 @@ string? inviteRedirect = Environment.GetEnvironmentVariable("NETSIP_INVITE_REDIR
 SipDialPlanResult defaultInviteResult = string.IsNullOrWhiteSpace(inviteRedirect)
     ? SipDialPlanResult.Reject(404, "Not Found"u8.ToArray())
     : SipDialPlanResult.Redirect(Encoding.ASCII.GetBytes(inviteRedirect));
+ISipDialPlanProcessor dialPlan = new PrefixSipDialPlanProcessor(
+    [],
+    defaultInviteResult);
+SipAudioFileDialPlanProcessor? playbackProcessor = null;
+string? star86Wav = Environment.GetEnvironmentVariable("NETSIP_STAR86_WAV");
+if (!string.IsNullOrWhiteSpace(star86Wav))
+{
+    string rtpAddressValue =
+        Environment.GetEnvironmentVariable("NETSIP_RTP_ADDRESS") ??
+        throw new InvalidOperationException(
+            "NETSIP_RTP_ADDRESS is required when NETSIP_STAR86_WAV is set.");
+    IPAddress rtpAddress = IPAddress.Parse(rtpAddressValue);
+    IPAddress rtpBindAddress = IPAddress.Parse(
+        Environment.GetEnvironmentVariable("NETSIP_RTP_BIND_ADDRESS") ??
+        rtpAddressValue);
+    string contact =
+        Environment.GetEnvironmentVariable("NETSIP_STAR86_CONTACT") ??
+        $"<sips:playback@{FormatSipHost(rtpAddress)}:{port}>";
+    playbackProcessor = new SipAudioFileDialPlanProcessor(
+        dialPlan,
+        new SipAudioFilePlaybackOptions
+        {
+            AudioFilePath = star86Wav,
+            Contact = contact,
+            BindAddress = rtpBindAddress,
+            AdvertisedAddress = rtpAddress
+        },
+        loggerFactory.CreateLogger<SipAudioFileDialPlanProcessor>());
+    dialPlan = playbackProcessor;
+}
+
 SipInviteRequestHandler inviteHandler = new(
-    new PrefixSipDialPlanProcessor([], defaultInviteResult));
+    dialPlan);
+ISipRequestHandler applicationHandler = new DefaultSipRequestHandler(
+    new RegisterSipRequestHandler(),
+    inviteHandler);
+string? digestUserName = Environment.GetEnvironmentVariable("NETSIP_DIGEST_USERNAME");
+string? digestPassword = Environment.GetEnvironmentVariable("NETSIP_DIGEST_PASSWORD");
+if (digestUserName is not null || digestPassword is not null)
+{
+    if (string.IsNullOrWhiteSpace(digestUserName) || digestPassword is null)
+    {
+        throw new InvalidOperationException(
+            "NETSIP_DIGEST_USERNAME and NETSIP_DIGEST_PASSWORD must both be set.");
+    }
+
+    string digestRealm =
+        Environment.GetEnvironmentVariable("NETSIP_DIGEST_REALM") ?? "NetSIP";
+    bool allowMd5 = string.Equals(
+        Environment.GetEnvironmentVariable("NETSIP_DIGEST_ALLOW_MD5"),
+        "true",
+        StringComparison.OrdinalIgnoreCase);
+    InMemorySipDigestCredentialProvider credentials = new(
+        digestRealm,
+        [new KeyValuePair<string, string>(digestUserName, digestPassword)]);
+    applicationHandler = new SipDigestAuthenticationHandler(
+        applicationHandler,
+        credentials,
+        new SipDigestAuthenticationOptions
+        {
+            Realm = digestRealm,
+            Algorithms = allowMd5
+                ? SipDigestAlgorithms.Sha256 | SipDigestAlgorithms.Md5
+                : SipDigestAlgorithms.Sha256
+        });
+}
 
 await using SipTlsServer server = new(
     new SipTlsServerOptions
@@ -57,9 +127,7 @@ await using SipTlsServer server = new(
         ListenEndPoint = new IPEndPoint(address, port),
         ServerCertificate = certificate
     },
-    new DefaultSipRequestHandler(
-        new RegisterSipRequestHandler(),
-        inviteHandler),
+    applicationHandler,
     logger);
 
 using CancellationTokenSource shutdown = new();
@@ -69,16 +137,25 @@ Console.CancelKeyPress += (_, eventArgs) =>
     shutdown.Cancel();
 };
 
-await server.StartAsync(shutdown.Token);
 try
 {
-    await Task.Delay(Timeout.InfiniteTimeSpan, shutdown.Token);
+    await server.StartAsync(shutdown.Token);
+    try
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, shutdown.Token);
+    }
+    catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+    {
+    }
 }
-catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+finally
 {
+    await server.StopAsync();
+    if (playbackProcessor is not null)
+    {
+        await playbackProcessor.DisposeAsync();
+    }
 }
-
-await server.StopAsync();
 
 static Dictionary<string, string> ParseArguments(string[] values)
 {
@@ -99,4 +176,11 @@ static Dictionary<string, string> ParseArguments(string[] values)
 static string? Get(Dictionary<string, string> values, string key)
 {
     return values.TryGetValue(key, out string? value) ? value : null;
+}
+
+static string FormatSipHost(IPAddress address)
+{
+    return address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6
+        ? $"[{address}]"
+        : address.ToString();
 }

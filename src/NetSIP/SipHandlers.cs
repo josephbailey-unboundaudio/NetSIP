@@ -14,6 +14,12 @@ namespace NetSIP;
 /// </summary>
 public interface ISipRequestHandler
 {
+    /// <summary>Handles one borrowed SIP message.</summary>
+    /// <param name="context">
+    /// The reusable connection context. It and its message must not be retained.
+    /// </param>
+    /// <param name="cancellationToken">The cooperative handler deadline and shutdown token.</param>
+    /// <returns>An operation that completes after the handler has finished using borrowed data.</returns>
     ValueTask HandleAsync(SipRequestContext context, CancellationToken cancellationToken);
 }
 
@@ -147,6 +153,9 @@ public sealed class SipResponseWriter
     }
 
     /// <summary>Writes a successful REGISTER response containing the current bindings.</summary>
+    /// <param name="request">The REGISTER request whose transaction headers are preserved.</param>
+    /// <param name="bindings">The current owned bindings to serialize as Contact fields.</param>
+    /// <returns><see langword="true"/> when the request and bindings were valid and written.</returns>
     public bool WriteRegisterOk(
         SipMessageView request,
         ReadOnlySpan<SipRegistrationBinding> bindings)
@@ -164,6 +173,9 @@ public sealed class SipResponseWriter
     }
 
     /// <summary>Writes a REGISTER 423 response with the registrar's minimum expiration.</summary>
+    /// <param name="request">The REGISTER request whose transaction headers are preserved.</param>
+    /// <param name="minimumExpires">The positive minimum interval in seconds.</param>
+    /// <returns><see langword="true"/> when the response was written.</returns>
     public bool WriteRegisterIntervalTooBrief(SipMessageView request, int minimumExpires)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(minimumExpires);
@@ -179,6 +191,9 @@ public sealed class SipResponseWriter
     }
 
     /// <summary>Writes a final response selected by an INVITE dialplan.</summary>
+    /// <param name="request">The INVITE request whose transaction headers are preserved.</param>
+    /// <param name="result">The owned, validated dialplan result.</param>
+    /// <returns><see langword="true"/> when the request and result were valid and written.</returns>
     public bool WriteInviteResponse(
         SipMessageView request,
         SipDialPlanResult result)
@@ -199,10 +214,63 @@ public sealed class SipResponseWriter
                 inviteContact: result.Contact.Span);
     }
 
+    /// <summary>Writes one 401 Digest challenge per enabled algorithm.</summary>
+    /// <param name="request">The request whose transaction headers are preserved.</param>
+    /// <param name="realm">A printable ASCII realm without quote or backslash.</param>
+    /// <param name="nonce">A printable ASCII server nonce.</param>
+    /// <param name="algorithms">The algorithms to advertise, in secure preference order.</param>
+    /// <param name="stale">Whether the prior nonce was valid but expired.</param>
+    /// <returns>
+    /// <see langword="true"/> when the challenge was written; otherwise,
+    /// <see langword="false"/> when required request headers were unavailable.
+    /// </returns>
+    public bool WriteDigestChallenge(
+        SipMessageView request,
+        ReadOnlySpan<byte> realm,
+        ReadOnlySpan<byte> nonce,
+        SipDigestAlgorithms algorithms,
+        bool stale = false)
+    {
+        if (realm.IsEmpty ||
+            nonce.IsEmpty ||
+            !IsSafeDigestChallengeValue(realm) ||
+            !IsSafeDigestChallengeValue(nonce))
+        {
+            throw new ArgumentException("Digest challenge values must contain safe printable ASCII.");
+        }
+
+        _ = algorithms == SipDigestAlgorithms.None ||
+            (algorithms & ~(SipDigestAlgorithms.Sha256 | SipDigestAlgorithms.Md5)) != 0
+            ? throw new ArgumentOutOfRangeException(nameof(algorithms))
+            : algorithms;
+
+        return WriteResponseCore(
+            401,
+            "Unauthorized"u8,
+            request,
+            body: default,
+            contentType: default,
+            ResponseHeaders.DigestChallenge,
+            bindings: default,
+            digestRealm: realm,
+            digestNonce: nonce,
+            digestAlgorithms: algorithms,
+            digestStale: stale);
+    }
+
     /// <summary>
     /// Writes a response that preserves the request's transaction and dialog headers.
     /// The supplied spans are consumed before this method returns.
     /// </summary>
+    /// <param name="statusCode">The response status from 100 through 699.</param>
+    /// <param name="reasonPhrase">The reason phrase, without line breaks.</param>
+    /// <param name="request">The request whose Via, From, To, Call-ID, and CSeq are reflected.</param>
+    /// <param name="body">An optional response body.</param>
+    /// <param name="contentType">The body media type, required for a non-empty body.</param>
+    /// <returns>
+    /// <see langword="true"/> when required safe transaction headers were available;
+    /// otherwise, <see langword="false"/>.
+    /// </returns>
     public bool WriteResponse(
         int statusCode,
         ReadOnlySpan<byte> reasonPhrase,
@@ -232,6 +300,10 @@ public sealed class SipResponseWriter
     /// <param name="bindings">Registration bindings for REGISTER responses.</param>
     /// <param name="minimumExpires">Minimum expiration for 423 responses.</param>
     /// <param name="inviteContact">Contact selected by an INVITE dialplan.</param>
+    /// <param name="digestRealm">Realm for a Digest challenge.</param>
+    /// <param name="digestNonce">Nonce for a Digest challenge.</param>
+    /// <param name="digestAlgorithms">Algorithms advertised by a Digest challenge.</param>
+    /// <param name="digestStale">Whether a Digest challenge replaces an expired nonce.</param>
     /// <returns>true if the response was written; false if the request was invalid.</returns>
     private bool WriteResponseCore(
         int statusCode,
@@ -242,7 +314,11 @@ public sealed class SipResponseWriter
         ResponseHeaders responseHeaders,
         ReadOnlySpan<SipRegistrationBinding> bindings = default,
         int minimumExpires = 0,
-        ReadOnlySpan<byte> inviteContact = default)
+        ReadOnlySpan<byte> inviteContact = default,
+        ReadOnlySpan<byte> digestRealm = default,
+        ReadOnlySpan<byte> digestNonce = default,
+        SipDigestAlgorithms digestAlgorithms = SipDigestAlgorithms.None,
+        bool digestStale = false)
     {
         if (statusCode is < 100 or > 699)
         {
@@ -330,7 +406,11 @@ public sealed class SipResponseWriter
             responseHeaders,
             bindings,
             minimumExpires,
-            inviteContact);
+            inviteContact,
+            digestRealm,
+            digestNonce,
+            digestAlgorithms,
+            digestStale);
         if (!contentType.IsEmpty)
         {
             Write("Content-Type: "u8);
@@ -481,7 +561,11 @@ public sealed class SipResponseWriter
         ResponseHeaders responseHeaders,
         ReadOnlySpan<SipRegistrationBinding> bindings,
         int minimumExpires,
-        ReadOnlySpan<byte> inviteContact)
+        ReadOnlySpan<byte> inviteContact,
+        ReadOnlySpan<byte> digestRealm,
+        ReadOnlySpan<byte> digestNonce,
+        SipDigestAlgorithms digestAlgorithms,
+        bool digestStale)
     {
         switch (responseHeaders)
         {
@@ -544,9 +628,63 @@ public sealed class SipResponseWriter
                 Write(inviteContact);
                 Write("\r\n"u8);
                 return;
+            case ResponseHeaders.DigestChallenge:
+                if ((digestAlgorithms & SipDigestAlgorithms.Sha256) != 0)
+                {
+                    WriteDigestChallengeHeader(
+                        digestRealm,
+                        digestNonce,
+                        "SHA-256"u8,
+                        digestStale);
+                }
+
+                if ((digestAlgorithms & SipDigestAlgorithms.Md5) != 0)
+                {
+                    WriteDigestChallengeHeader(
+                        digestRealm,
+                        digestNonce,
+                        "MD5"u8,
+                        digestStale);
+                }
+
+                return;
             default:
                 throw new ArgumentOutOfRangeException(nameof(responseHeaders));
         }
+    }
+
+    private void WriteDigestChallengeHeader(
+        ReadOnlySpan<byte> realm,
+        ReadOnlySpan<byte> nonce,
+        ReadOnlySpan<byte> algorithm,
+        bool stale)
+    {
+        Write("WWW-Authenticate: Digest realm=\""u8);
+        Write(realm);
+        Write("\", nonce=\""u8);
+        Write(nonce);
+        Write("\", algorithm="u8);
+        Write(algorithm);
+        Write(", qop=\"auth\", charset=UTF-8"u8);
+        if (stale)
+        {
+            Write(", stale=true"u8);
+        }
+
+        Write("\r\n"u8);
+    }
+
+    private static bool IsSafeDigestChallengeValue(ReadOnlySpan<byte> value)
+    {
+        foreach (byte current in value)
+        {
+            if (current is < 0x20 or >= 0x7f or (byte)'"' or (byte)'\\')
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -782,6 +920,8 @@ public sealed class SipResponseWriter
         MinExpires,
         /// <summary>Contact selected by an INVITE dialplan.</summary>
         InviteContact,
+        /// <summary>One WWW-Authenticate header per enabled Digest algorithm.</summary>
+        DigestChallenge,
         /// <summary>Connection: close.</summary>
         ConnectionClose
     }
@@ -820,6 +960,7 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
     }
 
     /// <summary>Initializes a handler that supports OPTIONS and INVITE.</summary>
+    /// <param name="inviteHandler">The handler for INVITE requests.</param>
     public DefaultSipRequestHandler(SipInviteRequestHandler inviteHandler)
         : this(
             registerHandler: null,
@@ -828,6 +969,8 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
     }
 
     /// <summary>Initializes a handler with optional REGISTER and INVITE support.</summary>
+    /// <param name="registerHandler">The optional handler for REGISTER requests.</param>
+    /// <param name="inviteHandler">The optional handler for INVITE requests.</param>
     public DefaultSipRequestHandler(
         RegisterSipRequestHandler? registerHandler,
         SipInviteRequestHandler? inviteHandler)
@@ -842,13 +985,12 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
     /// </summary>
     /// <param name="context">The request context.</param>
     /// <param name="cancellationToken">Cancellation token for the operation.</param>
-    /// <returns>A completed task.</returns>
+    /// <returns>The selected handler operation.</returns>
     public ValueTask HandleAsync(SipRequestContext context, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         SipMessageView message = context.Message;
 
-        // Handle OPTIONS requests
         if (Ascii.EqualsIgnoreCase(message.Method, "OPTIONS"u8))
         {
             if (!context.Response.WriteOptionsOk(
@@ -859,7 +1001,6 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
                 context.Response.WriteError(400);
             }
         }
-        // Handle REGISTER requests if handler is configured
         else if (_registerHandler is not null &&
             Ascii.EqualsIgnoreCase(message.Method, "REGISTER"u8))
         {
@@ -870,7 +1011,6 @@ public sealed class DefaultSipRequestHandler : ISipRequestHandler
         {
             return _inviteHandler.HandleAsync(context, cancellationToken);
         }
-        // Reject all other methods
         else if (!context.Response.WriteResponse(501, "Not Implemented"u8, message))
         {
             context.Response.WriteError(400);

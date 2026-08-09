@@ -1,23 +1,23 @@
 namespace NetSIP;
 
 /// <summary>
-/// Specifies the type of a SIP message.
+/// Identifies whether a parsed SIP start line represents a request or response.
 /// </summary>
 public enum SipMessageKind
 {
     /// <summary>
-    /// A SIP request message (e.g., REGISTER, INVITE).
+    /// A SIP request message, such as REGISTER or INVITE.
     /// </summary>
     Request,
 
     /// <summary>
-    /// A SIP response message (e.g., 200 OK, 404 Not Found).
+    /// A SIP response message, such as 200 OK or 404 Not Found.
     /// </summary>
     Response
 }
 
 /// <summary>
-/// Defines the types of errors that can occur when parsing a SIP message.
+/// Identifies why a complete SIP message could not be parsed.
 /// </summary>
 public enum SipParseError
 {
@@ -42,7 +42,7 @@ public enum SipParseError
     MalformedHeader,
 
     /// <summary>
-    /// The Content-Length header contains an invalid value.
+    /// Content-Length is malformed, conflicting, or inconsistent with the frame size.
     /// </summary>
     InvalidContentLength,
 
@@ -53,7 +53,7 @@ public enum SipParseError
 }
 
 /// <summary>
-/// Indicates the status of a SIP message frame extraction.
+/// Identifies the result of extracting one SIP frame from a transport buffer.
 /// </summary>
 public enum SipFrameStatus
 {
@@ -79,8 +79,7 @@ public enum SipFrameStatus
 }
 
 /// <summary>
-/// Internal metadata structure that stores offsets and lengths for different parts of a parsed SIP message.
-/// This allows zero-allocation message parsing by storing only offsets into the original buffer.
+/// Stores offsets into the source buffer so message views do not allocate owned values.
 /// </summary>
 internal readonly struct SipMessageMetadata(
     SipMessageKind kind,
@@ -97,12 +96,12 @@ internal readonly struct SipMessageMetadata(
     int bodyLength)
 {
     /// <summary>
-    /// Gets the message kind (Request or Response).
+    /// Gets the message kind.
     /// </summary>
     public SipMessageKind Kind { get; } = kind;
 
     /// <summary>
-    /// Gets the offset of the first token in the start line (Method for requests, Version for responses).
+    /// Gets the offset of the method for requests or version for responses.
     /// </summary>
     public int FirstTokenOffset { get; } = firstTokenOffset;
 
@@ -112,7 +111,7 @@ internal readonly struct SipMessageMetadata(
     public int FirstTokenLength { get; } = firstTokenLength;
 
     /// <summary>
-    /// Gets the offset of the second token in the start line (Request-URI for requests, Status-Code for responses).
+    /// Gets the offset of the request URI for requests or status code for responses.
     /// </summary>
     public int SecondTokenOffset { get; } = secondTokenOffset;
 
@@ -122,7 +121,7 @@ internal readonly struct SipMessageMetadata(
     public int SecondTokenLength { get; } = secondTokenLength;
 
     /// <summary>
-    /// Gets the offset of the third token in the start line (Version for requests, Reason-Phrase for responses).
+    /// Gets the offset of the version for requests or reason phrase for responses.
     /// </summary>
     public int ThirdTokenOffset { get; } = thirdTokenOffset;
 
@@ -132,7 +131,7 @@ internal readonly struct SipMessageMetadata(
     public int ThirdTokenLength { get; } = thirdTokenLength;
 
     /// <summary>
-    /// Gets the numeric status code for response messages.
+    /// Gets the numeric response status code, or zero for a request.
     /// </summary>
     public int StatusCode { get; } = statusCode;
 
@@ -175,7 +174,7 @@ public readonly ref struct SipMessageView
     }
 
     /// <summary>
-    /// Gets the message kind (Request or Response).
+    /// Gets the message kind.
     /// </summary>
     public SipMessageKind Kind => Metadata.Kind;
 
@@ -190,7 +189,7 @@ public readonly ref struct SipMessageView
     public ReadOnlySpan<byte> Raw { get; }
 
     /// <summary>
-    /// Gets the SIP method (e.g., "REGISTER", "INVITE") for request messages.
+    /// Gets the SIP method, such as REGISTER or INVITE, for request messages.
     /// Returns an empty span for response messages.
     /// </summary>
     public ReadOnlySpan<byte> Method =>
@@ -208,7 +207,7 @@ public readonly ref struct SipMessageView
             : [];
 
     /// <summary>
-    /// Gets the SIP version string (e.g., "SIP/2.0") from the message.
+    /// Gets the SIP version bytes from the start line.
     /// </summary>
     public ReadOnlySpan<byte> Version =>
         Kind == SipMessageKind.Request
@@ -216,12 +215,12 @@ public readonly ref struct SipMessageView
             : Raw.Slice(Metadata.FirstTokenOffset, Metadata.FirstTokenLength);
 
     /// <summary>
-    /// Gets the numeric status code for response messages.
+    /// Gets the numeric status code for a response, or zero for a request.
     /// </summary>
     public int StatusCode => Metadata.StatusCode;
 
     /// <summary>
-    /// Gets the reason phrase for response messages (e.g., "OK", "Not Found").
+    /// Gets the reason phrase for response messages.
     /// Returns an empty span for request messages.
     /// </summary>
     public ReadOnlySpan<byte> ReasonPhrase =>
@@ -230,12 +229,12 @@ public readonly ref struct SipMessageView
             : [];
 
     /// <summary>
-    /// Gets the message body bytes.
+    /// Gets the message body, or an empty span when Content-Length is zero or absent.
     /// </summary>
     public ReadOnlySpan<byte> Body => Raw.Slice(Metadata.BodyOffset, Metadata.BodyLength);
 
     /// <summary>
-    /// Creates an enumerator to iterate through all headers in the message.
+    /// Creates a zero-allocation enumerator over the message headers.
     /// </summary>
     /// <returns>A header enumerator.</returns>
     public SipHeaderEnumerator GetHeaders()
@@ -244,19 +243,17 @@ public readonly ref struct SipMessageView
     }
 
     /// <summary>
-    /// Attempts to find a header with the specified name (case-insensitive).
+    /// Attempts to find the first header with the specified ASCII case-insensitive name.
     /// </summary>
     /// <param name="name">The header name to search for.</param>
     /// <param name="value">When this method returns, contains the header value if found.</param>
     /// <returns>true if a header with the specified name was found; otherwise, false.</returns>
     public bool TryGetHeader(ReadOnlySpan<byte> name, out ReadOnlySpan<byte> value)
     {
-        // Iterate through all headers
         SipHeaderEnumerator headers = GetHeaders();
         while (headers.MoveNext())
         {
             SipHeaderView header = headers.Current;
-            // Case-insensitive comparison of header names
             if (Ascii.EqualsIgnoreCase(header.Name, name))
             {
                 value = header.Value;
@@ -269,7 +266,9 @@ public readonly ref struct SipMessageView
     }
 }
 
-/// <summary>A borrowed view over a SIP header, preserving the exact bytes after the colon.</summary>
+/// <summary>
+/// A borrowed header view that preserves every value byte following the first colon.
+/// </summary>
 public readonly ref struct SipHeaderView
 {
     /// <summary>
@@ -289,7 +288,7 @@ public readonly ref struct SipHeaderView
     public ReadOnlySpan<byte> Name { get; }
 
     /// <summary>
-    /// Gets the raw header value, preserving all bytes after the colon.
+    /// Gets the raw header value, including optional leading or trailing whitespace.
     /// </summary>
     public ReadOnlySpan<byte> RawValue { get; }
 
@@ -299,7 +298,10 @@ public readonly ref struct SipHeaderView
     public ReadOnlySpan<byte> Value => Ascii.TrimOptionalWhitespace(RawValue);
 }
 
-/// <summary>Enumerates headers without allocating or building a header collection.</summary>
+/// <summary>
+/// Enumerates borrowed headers without allocating. The source must remain valid
+/// for the lifetime of the enumerator.
+/// </summary>
 public ref struct SipHeaderEnumerator
 {
     /// <summary>
@@ -330,12 +332,10 @@ public ref struct SipHeaderEnumerator
     {
         while (!_remaining.IsEmpty)
         {
-            // Find the end of the current line
             int lineEnd = _remaining.IndexOf("\r\n"u8);
             ReadOnlySpan<byte> line;
             if (lineEnd < 0)
             {
-                // Last line without CRLF
                 line = _remaining;
                 _remaining = [];
             }
@@ -345,15 +345,13 @@ public ref struct SipHeaderEnumerator
                 _remaining = _remaining[(lineEnd + 2)..];
             }
 
-            // Find the colon separating name and value
             int colon = line.IndexOf((byte)':');
             if (colon <= 0)
             {
-                // Skip malformed headers
+                // Parsed messages cannot reach this path; tolerate it for minimal error views.
                 continue;
             }
 
-            // Split into name and value at the colon
             Current = new SipHeaderView(line[..colon], line[(colon + 1)..]);
             return true;
         }
@@ -363,7 +361,7 @@ public ref struct SipHeaderEnumerator
 }
 
 /// <summary>
-/// Provides ASCII-specific string operations for efficient SIP message parsing.
+/// Provides allocation-free ASCII operations used by SIP parsing and matching.
 /// </summary>
 internal static class Ascii
 {
@@ -389,7 +387,6 @@ internal static class Ascii
                 continue;
             }
 
-            // Convert uppercase ASCII to lowercase
             if ((uint)(a - (byte)'A') <= 'Z' - 'A')
             {
                 a = (byte)(a + ('a' - 'A'));
@@ -417,14 +414,12 @@ internal static class Ascii
     public static ReadOnlySpan<byte> TrimOptionalWhitespace(ReadOnlySpan<byte> value)
     {
         int start = 0;
-        // Trim leading whitespace
         while (start < value.Length && IsOptionalWhitespace(value[start]))
         {
             start++;
         }
 
         int end = value.Length;
-        // Trim trailing whitespace
         while (end > start && IsOptionalWhitespace(value[end - 1]))
         {
             end--;
@@ -451,7 +446,6 @@ internal static class Ascii
     /// <returns>true if the byte is a valid token character; otherwise, false.</returns>
     public static bool IsTokenByte(byte value)
     {
-        // Valid token bytes are printable ASCII (0x21-0x7E) excluding separators
         return value is >= 0x21 and <= 0x7e and
         not (byte)'(' and not (byte)')' and not (byte)'<' and not (byte)'>' and
         not (byte)'@' and not (byte)',' and not (byte)';' and not (byte)':' and

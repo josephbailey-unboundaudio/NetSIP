@@ -1,5 +1,6 @@
 using NetSIP;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -26,6 +27,8 @@ using System.Text;
     ("TLS server applies INVITE dialplan", TlsServerAppliesInviteDialPlan),
     ("TLS server validates INVITE before dialplan", TlsServerValidatesInvite),
     ("INVITE response rejects injected dialplan output", InviteResponseRejectsInjectedOutput),
+    ("TLS server authenticates INVITE and REGISTER", TlsServerAuthenticatesInviteAndRegister),
+    ("TLS server plays *86 WAV audio over RTP", TlsServerPlaysStar86Audio),
     ("TLS server preserves compact transaction headers", TlsServerPreservesCompactHeaders),
     ("TLS server handles pipelined requests with bodies", TlsServerHandlesPipelinedRequests),
     ("TLS server returns errors for malformed input", TlsServerRejectsMalformedInput),
@@ -608,6 +611,285 @@ static async Task InviteResponseRejectsInjectedOutput()
     await server.StopAsync();
 }
 
+static async Task TlsServerAuthenticatesInviteAndRegister()
+{
+    const string realm = "netsip.example";
+    const string userName = "alice";
+    const string password = "correct horse battery staple";
+    using X509Certificate2 certificate = CreateServerCertificate();
+    AdjustableTimeProvider clock = new(
+        new DateTimeOffset(2026, 8, 9, 12, 0, 0, TimeSpan.Zero));
+    CountingDialPlanProcessor dialPlan = new(
+        SipDialPlanResult.Reject(486, Bytes("Busy Here")));
+    ISipRequestHandler application = new DefaultSipRequestHandler(
+        new RegisterSipRequestHandler(),
+        new SipInviteRequestHandler(dialPlan));
+    InMemorySipDigestCredentialProvider credentials = new(
+        realm,
+        [new KeyValuePair<string, string>(userName, password)]);
+    SipDigestAuthenticationHandler authenticated = new(
+        application,
+        credentials,
+        new SipDigestAuthenticationOptions
+        {
+            Realm = realm,
+            Algorithms = SipDigestAlgorithms.Sha256 | SipDigestAlgorithms.Md5,
+            NonceLifetime = TimeSpan.FromMinutes(1),
+            MaxTrackedAuthentications = 2
+        },
+        timeProvider: clock);
+    await using SipTlsServer server = CreateServer(certificate, authenticated);
+    await server.StartAsync();
+
+    string options = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        OptionsRequest(900),
+        fragment: false);
+    Assert.Contains("SIP/2.0 200 OK\r\n", options);
+
+    string invite = InviteRequest("100");
+    string inviteChallenge = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        invite,
+        fragment: false);
+    Assert.Contains("SIP/2.0 401 Unauthorized\r\n", inviteChallenge);
+    Assert.Contains("algorithm=SHA-256", inviteChallenge);
+    Assert.Contains("algorithm=MD5", inviteChallenge);
+    Assert.Equal(0, dialPlan.Calls);
+
+    string inviteNonce = GetDigestNonce(inviteChallenge, "SHA-256");
+    string inviteAuthorization = CreateDigestAuthorization(
+        userName,
+        realm,
+        password,
+        inviteNonce,
+        "INVITE",
+        "sip:100@example.com",
+        "SHA-256",
+        includeAlgorithm: true);
+    string wrongPasswordAuthorization = CreateDigestAuthorization(
+        userName,
+        realm,
+        "wrong password",
+        inviteNonce,
+        "INVITE",
+        "sip:100@example.com",
+        "SHA-256",
+        includeAlgorithm: true);
+    string wrongPassword = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        AddAuthorization(invite, wrongPasswordAuthorization),
+        fragment: false);
+    Assert.Contains("SIP/2.0 401 Unauthorized\r\n", wrongPassword);
+    Assert.Equal(0, dialPlan.Calls);
+
+    string unknownUserAuthorization = CreateDigestAuthorization(
+        "mallory",
+        realm,
+        "unknown password",
+        inviteNonce,
+        "INVITE",
+        "sip:100@example.com",
+        "SHA-256",
+        includeAlgorithm: true);
+    string unknownUser = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        AddAuthorization(invite, unknownUserAuthorization),
+        fragment: false);
+    Assert.Contains("SIP/2.0 401 Unauthorized\r\n", unknownUser);
+    Assert.Equal(0, dialPlan.Calls);
+
+    string authorizedInvite = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        AddAuthorization(invite, inviteAuthorization),
+        fragment: false);
+    Assert.Contains("SIP/2.0 486 Busy Here\r\n", authorizedInvite);
+    Assert.Equal(1, dialPlan.Calls);
+
+    string duplicateAuthorization = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        AddAuthorization(
+            AddAuthorization(invite, inviteAuthorization),
+            inviteAuthorization),
+        fragment: false);
+    Assert.Contains("SIP/2.0 401 Unauthorized\r\n", duplicateAuthorization);
+    Assert.Equal(1, dialPlan.Calls);
+
+    string replayAuthorization = CreateDigestAuthorization(
+        userName,
+        realm,
+        password,
+        inviteNonce.ToUpperInvariant(),
+        "INVITE",
+        "sip:100@example.com",
+        "SHA-256",
+        includeAlgorithm: true);
+    string replay = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        AddAuthorization(invite, replayAuthorization),
+        fragment: false);
+    Assert.Contains("SIP/2.0 401 Unauthorized\r\n", replay);
+    Assert.Equal(1, dialPlan.Calls);
+
+    string register = RegisterRequest(
+        "Contact: <sip:alice@client.example.com>\r\n");
+    string registerChallenge = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        register,
+        fragment: false);
+    string registerNonce = GetDigestNonce(registerChallenge, "MD5");
+    string registerAuthorization = CreateDigestAuthorization(
+        userName,
+        realm,
+        password,
+        registerNonce,
+        "REGISTER",
+        "sip:example.com",
+        "MD5",
+        includeAlgorithm: false);
+    string authorizedRegister = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        AddAuthorization(register, registerAuthorization),
+        fragment: false);
+    Assert.Contains("SIP/2.0 200 OK\r\n", authorizedRegister);
+
+    string capacityChallenge = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        invite,
+        fragment: false);
+    string capacityNonce = GetDigestNonce(capacityChallenge, "SHA-256");
+    string capacityAuthorization = CreateDigestAuthorization(
+        userName,
+        realm,
+        password,
+        capacityNonce,
+        "INVITE",
+        "sip:100@example.com",
+        "SHA-256",
+        includeAlgorithm: true);
+    string capacityRejected = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        AddAuthorization(invite, capacityAuthorization),
+        fragment: false);
+    Assert.Contains("SIP/2.0 401 Unauthorized\r\n", capacityRejected);
+    Assert.Equal(1, dialPlan.Calls);
+
+    string staleNonce = GetDigestNonce(replay, "SHA-256");
+    clock.Advance(TimeSpan.FromSeconds(61));
+    string staleAuthorization = CreateDigestAuthorization(
+        userName,
+        realm,
+        password,
+        staleNonce,
+        "INVITE",
+        "sip:100@example.com",
+        "SHA-256",
+        includeAlgorithm: true);
+    string stale = await SendRequestAsync(
+        server.BoundEndPoint!.Port,
+        AddAuthorization(invite, staleAuthorization),
+        fragment: false);
+    Assert.Contains("SIP/2.0 401 Unauthorized\r\n", stale);
+    Assert.Contains("stale=true", stale);
+    Assert.Equal(1, dialPlan.Calls);
+    await server.StopAsync();
+}
+
+static async Task TlsServerPlaysStar86Audio()
+{
+    string wavPath = Path.Combine(
+        Path.GetTempPath(),
+        $"netsip-playback-{Guid.NewGuid():N}.wav");
+    try
+    {
+        File.WriteAllBytes(wavPath, CreateTestWav(sampleCount: 321));
+        using X509Certificate2 certificate = CreateServerCertificate();
+        using UdpClient rtpReceiver = new(
+            new IPEndPoint(IPAddress.Loopback, 0));
+        int remoteRtpPort = ((IPEndPoint)rtpReceiver.Client.LocalEndPoint!).Port;
+        PrefixSipDialPlanProcessor fallback = new(
+            [],
+            SipDialPlanResult.Reject(404, Bytes("Not Found")));
+        await using SipAudioFileDialPlanProcessor playback = new(
+            fallback,
+            new SipAudioFilePlaybackOptions
+            {
+                AudioFilePath = wavPath,
+                Contact = "<sips:playback@127.0.0.1>",
+                BindAddress = IPAddress.Loopback,
+                AdvertisedAddress = IPAddress.Loopback,
+                StartDelay = TimeSpan.FromMilliseconds(10),
+                MaxConcurrentSessions = 1
+            });
+        await using SipTlsServer server = CreateServer(
+            certificate,
+            new SipInviteRequestHandler(playback));
+        await server.StartAsync();
+
+        string response = await SendRequestAsync(
+            server.BoundEndPoint!.Port,
+            InviteRequestWithSdp("*86", remoteRtpPort, IPAddress.Loopback),
+            fragment: true);
+        Assert.Contains("SIP/2.0 200 OK\r\n", response);
+        Assert.Contains("Content-Type: application/sdp\r\n", response);
+        Assert.Contains("m=audio ", response);
+        Assert.Contains(" RTP/AVP 0\r\n", response);
+        Assert.Contains("a=sendonly\r\n", response);
+
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(5));
+        UdpReceiveResult rtp = await rtpReceiver.ReceiveAsync(timeout.Token);
+        Assert.Equal(172, rtp.Buffer.Length);
+        Assert.Equal((byte)0x80, rtp.Buffer[0]);
+        Assert.Equal((byte)0x80, rtp.Buffer[1]);
+        Assert.True(
+            rtp.Buffer.AsSpan(12).ContainsAnyExcept((byte)0xff),
+            "The RTP payload should contain transcoded audio, not only mu-law silence.");
+        UdpReceiveResult secondRtp = await rtpReceiver.ReceiveAsync(timeout.Token);
+        UdpReceiveResult finalRtp = await rtpReceiver.ReceiveAsync(timeout.Token);
+        Assert.Equal(172, secondRtp.Buffer.Length);
+        Assert.Equal(13, finalRtp.Buffer.Length);
+        Assert.Equal((byte)0, finalRtp.Buffer[1]);
+
+        string unsafeMediaTarget = await SendRequestAsync(
+            server.BoundEndPoint.Port,
+            InviteRequestWithSdp(
+                "*86",
+                remoteRtpPort,
+                IPAddress.Parse("192.0.2.10")),
+            fragment: false);
+        Assert.Contains("SIP/2.0 488 Not Acceptable Here\r\n", unsafeMediaTarget);
+
+        string incompatibleDirection = await SendRequestAsync(
+            server.BoundEndPoint.Port,
+            InviteRequestWithSdp("*86", remoteRtpPort, IPAddress.Loopback).Replace(
+                "a=recvonly\r\n",
+                "a=sendonly\r\n",
+                StringComparison.Ordinal),
+            fragment: false);
+        Assert.Contains("SIP/2.0 488 Not Acceptable Here\r\n", incompatibleDirection);
+
+        string multipleMediaSections = await SendRequestAsync(
+            server.BoundEndPoint.Port,
+            InviteRequestWithSdp("*86", remoteRtpPort, IPAddress.Loopback).Replace(
+                "m=audio ",
+                "m=video 4000 RTP/AVP 31\r\nm=audio ",
+                StringComparison.Ordinal),
+            fragment: false);
+        Assert.Contains("SIP/2.0 488 Not Acceptable Here\r\n", multipleMediaSections);
+
+        string fallbackResponse = await SendRequestAsync(
+            server.BoundEndPoint.Port,
+            InviteRequestWithSdp("100", remoteRtpPort, IPAddress.Loopback),
+            fragment: false);
+        Assert.Contains("SIP/2.0 404 Not Found\r\n", fallbackResponse);
+        await server.StopAsync();
+    }
+    finally
+    {
+        File.Delete(wavPath);
+    }
+}
+
 static async Task TlsServerRejectsMalformedInput()
 {
     using X509Certificate2 certificate = CreateServerCertificate();
@@ -646,7 +928,7 @@ static async Task TlsServerHandlesPipelinedRequests()
 
     using TcpClient client = new();
     await client.ConnectAsync(IPAddress.Loopback, server.BoundEndPoint!.Port);
-#pragma warning disable CA5359 // Do Not Disable Certificate Validation - Acceptable for testing with self-signed certificates
+#pragma warning disable CA5359 // The isolated client connects only to its locally generated test server.
     using SslStream tls = new(
         client.GetStream(),
         leaveInnerStreamOpen: false,
@@ -689,7 +971,7 @@ static async Task TlsServerShutsDownConnections()
 
     using TcpClient client = new();
     await client.ConnectAsync(IPAddress.Loopback, server.BoundEndPoint!.Port);
-#pragma warning disable CA5359 // Do Not Disable Certificate Validation - Acceptable for testing with self-signed certificates
+#pragma warning disable CA5359 // The isolated client connects only to its locally generated test server.
     using SslStream tls = new(
         client.GetStream(),
         leaveInnerStreamOpen: false,
@@ -795,7 +1077,7 @@ static async Task<string> SendRequestAsync(int port, string request, bool fragme
 {
     using TcpClient client = new();
     await client.ConnectAsync(IPAddress.Loopback, port);
-#pragma warning disable CA5359 // Do Not Disable Certificate Validation - Acceptable for testing with self-signed certificates
+#pragma warning disable CA5359 // The isolated client connects only to its locally generated test server.
     using SslStream tls = new(
         client.GetStream(),
         leaveInnerStreamOpen: false,
@@ -920,6 +1202,129 @@ static string InviteRequest(string destination)
     "CSeq: 1 INVITE\r\n" +
     "Contact: <sips:caller@client.example.com>\r\n" +
     "Content-Length: 0\r\n\r\n";
+}
+
+static string InviteRequestWithSdp(
+    string destination,
+    int mediaPort,
+    IPAddress mediaAddress)
+{
+    string addressType = mediaAddress.AddressFamily == AddressFamily.InterNetwork
+        ? "IP4"
+        : "IP6";
+    string sdp =
+        "v=0\r\n" +
+        $"o=test 1 1 IN {addressType} {mediaAddress}\r\n" +
+        "s=NetSIP test\r\n" +
+        $"c=IN {addressType} {mediaAddress}\r\n" +
+        "t=0 0\r\n" +
+        $"m=audio {mediaPort.ToString(System.Globalization.CultureInfo.InvariantCulture)} RTP/AVP 0\r\n" +
+        "a=rtpmap:0 PCMU/8000\r\n" +
+        "a=recvonly\r\n";
+    return InviteRequest(destination).Replace(
+        "Content-Length: 0\r\n\r\n",
+        $"Content-Type: application/sdp\r\n" +
+        $"Content-Length: {Encoding.ASCII.GetByteCount(sdp)}\r\n\r\n{sdp}",
+        StringComparison.Ordinal);
+}
+
+static byte[] CreateTestWav(int sampleCount)
+{
+    byte[] wav = new byte[44 + (sampleCount * sizeof(short))];
+    "RIFF"u8.CopyTo(wav);
+    BinaryPrimitives.WriteInt32LittleEndian(wav.AsSpan(4), wav.Length - 8);
+    "WAVEfmt "u8.CopyTo(wav.AsSpan(8));
+    BinaryPrimitives.WriteInt32LittleEndian(wav.AsSpan(16), 16);
+    BinaryPrimitives.WriteUInt16LittleEndian(wav.AsSpan(20), 1);
+    BinaryPrimitives.WriteUInt16LittleEndian(wav.AsSpan(22), 1);
+    BinaryPrimitives.WriteInt32LittleEndian(wav.AsSpan(24), 8000);
+    BinaryPrimitives.WriteInt32LittleEndian(wav.AsSpan(28), 16000);
+    BinaryPrimitives.WriteUInt16LittleEndian(wav.AsSpan(32), 2);
+    BinaryPrimitives.WriteUInt16LittleEndian(wav.AsSpan(34), 16);
+    "data"u8.CopyTo(wav.AsSpan(36));
+    BinaryPrimitives.WriteInt32LittleEndian(wav.AsSpan(40), sampleCount * sizeof(short));
+    for (int index = 0; index < sampleCount; index++)
+    {
+        short sample = (short)(Math.Sin(index * Math.Tau * 440 / 8000) * 12000);
+        BinaryPrimitives.WriteInt16LittleEndian(
+            wav.AsSpan(44 + (index * sizeof(short))),
+            sample);
+    }
+
+    return wav;
+}
+
+static string AddAuthorization(string request, string authorization)
+{
+    return request.Replace(
+        "Content-Length:",
+        $"Authorization: {authorization}\r\nContent-Length:",
+        StringComparison.Ordinal);
+}
+
+static string GetDigestNonce(string response, string algorithm)
+{
+    foreach (string line in response.Split("\r\n", StringSplitOptions.RemoveEmptyEntries))
+    {
+        if (!line.StartsWith("WWW-Authenticate: Digest ", StringComparison.Ordinal) ||
+            !line.Contains($"algorithm={algorithm}", StringComparison.Ordinal))
+        {
+            continue;
+        }
+
+        const string marker = "nonce=\"";
+        int start = line.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(start >= 0, "Digest challenge did not contain a nonce.");
+        start += marker.Length;
+        int end = line.IndexOf('"', start);
+        Assert.True(end > start, "Digest challenge nonce was malformed.");
+        return line[start..end];
+    }
+
+    throw new InvalidOperationException($"No {algorithm} Digest challenge was found.");
+}
+
+static string CreateDigestAuthorization(
+    string userName,
+    string realm,
+    string password,
+    string nonce,
+    string method,
+    string uri,
+    string algorithm,
+    bool includeAlgorithm)
+{
+    const string nonceCount = "00000001";
+    const string cnonce = "0123456789abcdef";
+    string ha1 = ComputeDigestHex($"{userName}:{realm}:{password}", algorithm);
+    string ha2 = ComputeDigestHex($"{method}:{uri}", algorithm);
+    string response = ComputeDigestHex(
+        $"{ha1}:{nonce}:{nonceCount}:{cnonce}:auth:{ha2}",
+        algorithm);
+    string algorithmParameter = includeAlgorithm
+        ? $", algorithm={algorithm}"
+        : string.Empty;
+    return $"Digest username=\"{userName}\", realm=\"{realm}\", nonce=\"{nonce}\", " +
+        $"uri=\"{uri}\", response=\"{response}\"{algorithmParameter}, qop=auth, " +
+        $"nc={nonceCount}, cnonce=\"{cnonce}\"";
+}
+
+static string ComputeDigestHex(string value, string algorithm)
+{
+    byte[] bytes = Encoding.UTF8.GetBytes(value);
+    byte[] hash;
+    if (algorithm == "SHA-256")
+    {
+        hash = SHA256.HashData(bytes);
+    }
+    else
+    {
+#pragma warning disable CA5351 // Test coverage for explicitly enabled legacy SIP Digest MD5.
+        hash = MD5.HashData(bytes);
+#pragma warning restore CA5351
+    }
+
+    return Convert.ToHexStringLower(hash);
 }
 
 static X509Certificate2 CreateServerCertificate()

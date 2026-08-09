@@ -21,7 +21,7 @@ public static class SipMessageFramer
     /// <param name="input">The input buffer that may contain one or more SIP messages.</param>
     /// <param name="limits">The server limits to enforce during framing.</param>
     /// <param name="message">When this method returns Complete, contains the complete message frame.</param>
-    /// <returns>The framing status indicating success or the reason more data is needed.</returns>
+    /// <returns>The framing status indicating completion, truncation, malformed framing, or excess size.</returns>
     public static SipFrameStatus TryRead(
         in ReadOnlySequence<byte> input,
         SipServerLimits limits,
@@ -30,24 +30,21 @@ public static class SipMessageFramer
         ArgumentNullException.ThrowIfNull(limits);
         message = default;
 
-        // Try to find the header/body separator
         SequenceReader<byte> reader = new(input);
         if (!reader.TryReadTo(out ReadOnlySequence<byte> headerBlock, HeaderTerminator, advancePastDelimiter: true))
         {
-            // No complete headers yet
             return input.Length > limits.MaxHeaderBytes
                 ? SipFrameStatus.TooLarge
                 : SipFrameStatus.NeedMoreData;
         }
 
-        // Validate total header size
         long headerBytes = headerBlock.Length + HeaderTerminator.Length;
         if (headerBytes > limits.MaxHeaderBytes)
         {
             return SipFrameStatus.TooLarge;
         }
 
-        // Parse headers line by line
+        // Inspect lines only as far as framing requires; SipParser performs full validation.
         SequenceReader<byte> lineReader = new(headerBlock);
         int lineNumber = 0;
         int headerCount = 0;
@@ -58,12 +55,10 @@ public static class SipMessageFramer
         {
             if (!lineReader.TryReadTo(out ReadOnlySequence<byte> line, CrLf, advancePastDelimiter: true))
             {
-                // Last line without CRLF
                 line = headerBlock.Slice(lineReader.Position);
                 lineReader.Advance(line.Length);
             }
 
-            // Handle start line (first line)
             if (lineNumber++ == 0)
             {
                 if (line.IsEmpty)
@@ -79,7 +74,6 @@ public static class SipMessageFramer
                 continue;
             }
 
-            // Validate header line
             if (line.IsEmpty)
             {
                 return SipFrameStatus.Malformed;
@@ -90,7 +84,6 @@ public static class SipMessageFramer
                 return SipFrameStatus.TooLarge;
             }
 
-            // Inspect header for Content-Length
             if (!TryInspectHeader(
                     line,
                     ref contentLengthSeen,
@@ -101,32 +94,30 @@ public static class SipMessageFramer
             }
         }
 
-        // Validate body size
         if (contentLength > limits.MaxBodyBytes)
         {
             return SipFrameStatus.TooLarge;
         }
 
-        // Check if we have complete body
         long totalLength = headerBytes + contentLength;
         if (input.Length < totalLength)
         {
             return SipFrameStatus.NeedMoreData;
         }
 
-        // Extract complete message
         message = input.Slice(0, totalLength);
         return SipFrameStatus.Complete;
     }
 
     /// <summary>
-    /// Inspects a header line and extracts the Content-Length value if present.
+    /// Inspects enough of a header line to locate and validate Content-Length.
+    /// Other field validation is deliberately deferred to <see cref="SipParser"/>.
     /// </summary>
     /// <param name="line">The header line to inspect.</param>
     /// <param name="contentLengthSeen">Tracks whether Content-Length has been seen before.</param>
     /// <param name="contentLength">The accumulated Content-Length value.</param>
     /// <param name="invalidContentLength">Set to true if the Content-Length is invalid.</param>
-    /// <returns>true if the header is valid; false if malformed.</returns>
+    /// <returns><see langword="false"/> only when Content-Length framing is invalid.</returns>
     private static bool TryInspectHeader(
         in ReadOnlySequence<byte> line,
         ref bool contentLengthSeen,
@@ -136,13 +127,13 @@ public static class SipMessageFramer
         invalidContentLength = false;
         SequenceReader<byte> reader = new(line);
 
-        // Check for header folding (not allowed in SIP)
+        // A continuation line cannot introduce a new Content-Length field.
         if (!reader.TryPeek(out byte first) || Ascii.IsOptionalWhitespace(first))
         {
             return true;
         }
 
-        // Extract header name
+        // Malformed non-critical names are rejected later by the complete parser.
         if (!reader.TryReadTo(out ReadOnlySequence<byte> name, (byte)':', advancePastDelimiter: true) ||
             name.IsEmpty ||
             !IsValidHeaderName(name))
@@ -150,23 +141,20 @@ public static class SipMessageFramer
             return true;
         }
 
-        // Extract header value
         ReadOnlySequence<byte> value = line.Slice(reader.Position);
         if (!IsValidHeaderValue(value))
         {
-            // Only fail if this is Content-Length (critical header)
+            // Invalid non-critical values cannot affect the frame boundary.
             return !SequenceEqualsIgnoreCase(name, "Content-Length"u8) &&
                 !SequenceEqualsIgnoreCase(name, "l"u8);
         }
 
-        // Check if this is Content-Length header (or compact form 'l')
         if (!SequenceEqualsIgnoreCase(name, "Content-Length"u8) &&
             !SequenceEqualsIgnoreCase(name, "l"u8))
         {
             return true;
         }
 
-        // Parse and validate Content-Length value
         if (!TryParseContentLength(value, out int parsedLength) ||
             (contentLengthSeen && parsedLength != contentLength))
         {
@@ -202,18 +190,17 @@ public static class SipMessageFramer
     }
 
     /// <summary>
-    /// Validates that a header value (in a ReadOnlySequence) contains only valid characters.
+    /// Rejects field values containing forbidden controls while permitting tabs,
+    /// printable ASCII, and opaque bytes above 0x7F.
     /// </summary>
     /// <param name="value">The header value sequence to validate.</param>
     /// <returns>true if the value is valid; otherwise, false.</returns>
     private static bool IsValidHeaderValue(in ReadOnlySequence<byte> value)
     {
-        // Iterate through all segments in the sequence
         foreach (ReadOnlyMemory<byte> segment in value)
         {
             foreach (byte current in segment.Span)
             {
-                // Allow tab and printable characters, but not control characters or DEL
                 if (current is (< 0x20 and not ((byte)'\t')) or 0x7f)
                 {
                     return false;
@@ -247,7 +234,6 @@ public static class SipMessageFramer
                 byte expectedValue = expected[index++];
                 byte actual = value;
 
-                // Convert uppercase to lowercase
                 if ((uint)(actual - (byte)'A') <= 'Z' - 'A')
                 {
                     actual = (byte)(actual + ('a' - 'A'));
@@ -285,7 +271,6 @@ public static class SipMessageFramer
         {
             foreach (byte current in segment.Span)
             {
-                // Skip leading/trailing whitespace
                 if (Ascii.IsOptionalWhitespace(current))
                 {
                     if (sawDigit)
@@ -296,7 +281,7 @@ public static class SipMessageFramer
                     continue;
                 }
 
-                // Validate no whitespace in middle of number, digit is valid, and no overflow
+                // Once trailing whitespace begins, another digit would be ambiguous.
                 if (sawTrailingWhitespace ||
                     current is < (byte)'0' or > (byte)'9' ||
                     parsed > (int.MaxValue - (current - '0')) / 10)

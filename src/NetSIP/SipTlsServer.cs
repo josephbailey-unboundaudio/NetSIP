@@ -15,32 +15,32 @@ namespace NetSIP;
 public sealed class SipTlsServer : IAsyncDisposable
 {
     /// <summary>
-    /// Server configuration options.
+    /// Validated server configuration.
     /// </summary>
     private readonly SipTlsServerOptions _options;
 
     /// <summary>
-    /// The request handler for processing SIP messages.
+    /// Application handler invoked serially for each message on a connection.
     /// </summary>
     private readonly ISipRequestHandler _handler;
 
     /// <summary>
-    /// Logger for server operations.
+    /// Structured server logger.
     /// </summary>
     private readonly ILogger _logger;
 
     /// <summary>
-    /// Cancellation token source for the server lifetime.
+    /// Cancellation source shared by the accept loop and active connections.
     /// </summary>
     private readonly CancellationTokenSource _lifetime = new();
 
     /// <summary>
-    /// Semaphore limiting concurrent connections.
+    /// Admission limit held for each accepted connection task.
     /// </summary>
     private readonly SemaphoreSlim _connectionSlots;
 
     /// <summary>
-    /// Tracks active connection tasks by connection ID.
+    /// Active connection tasks awaited during graceful shutdown.
     /// </summary>
     private readonly ConcurrentDictionary<long, Task> _connections = new();
 
@@ -55,12 +55,12 @@ public sealed class SipTlsServer : IAsyncDisposable
     private Task? _acceptLoop;
 
     /// <summary>
-    /// Counter for assigning unique connection IDs.
+    /// Monotonic diagnostic connection identifier.
     /// </summary>
     private long _nextConnectionId;
 
     /// <summary>
-    /// Server state: 0 = not started, 1 = started, 2 = stopping/stopped.
+    /// Lifecycle state: 0 = not started, 1 = started, 2 = stopping or stopped.
     /// </summary>
     private int _state;
 
@@ -86,15 +86,17 @@ public sealed class SipTlsServer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Gets the local endpoint the server is bound to after starting.
-    /// Returns null if the server has not been started.
+    /// Gets the actual local endpoint after startup, including an assigned ephemeral port.
+    /// Returns <see langword="null"/> before startup succeeds.
     /// </summary>
     public IPEndPoint? BoundEndPoint { get; private set; }
 
     /// <summary>
     /// Starts the server and begins accepting connections.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token for the start operation.</param>
+    /// <param name="cancellationToken">
+    /// A token that can cancel before startup begins. Use <see cref="StopAsync"/> for shutdown.
+    /// </param>
     /// <returns>A completed task if startup succeeds.</returns>
     /// <exception cref="InvalidOperationException">Thrown if the server has already been started.</exception>
     public Task StartAsync(CancellationToken cancellationToken = default)
@@ -105,7 +107,6 @@ public sealed class SipTlsServer : IAsyncDisposable
             throw new InvalidOperationException("The server has already been started.");
         }
 
-        // Create and configure the listening socket
         Socket listener = new(
             _options.ListenEndPoint.AddressFamily,
             SocketType.Stream,
@@ -128,7 +129,7 @@ public sealed class SipTlsServer : IAsyncDisposable
         }
         catch
         {
-            // Clean up on failure
+            // A failed bind/listen attempt leaves the instance eligible for another start.
             listener.Dispose();
             _ = Interlocked.Exchange(ref _state, 0);
             throw;
@@ -136,38 +137,35 @@ public sealed class SipTlsServer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Stops the server gracefully, waiting for active connections to complete.
+    /// Stops accepting connections, cancels active connection work, and waits for cleanup.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token for the stop operation.</param>
+    /// <param name="cancellationToken">
+    /// Cancels only the wait for shutdown; server cancellation still remains in effect.
+    /// </param>
     /// <returns>A task that completes when the server has fully stopped.</returns>
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         int priorState = Interlocked.Exchange(ref _state, 2);
         if (priorState == 0)
         {
-            // Already stopped
             return;
         }
 
         if (priorState == 2)
         {
-            // Stop already in progress
             SipLog.StopAlreadyInProgress(_logger);
         }
         else
         {
-            // Cancel lifetime and close listener
             _lifetime.Cancel();
             _listener?.Dispose();
         }
 
-        // Wait for accept loop to complete
         if (_acceptLoop is not null)
         {
             await _acceptLoop.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        // Wait for all active connections to complete
         Task[] activeConnections = [.. _connections.Values];
         if (activeConnections.Length != 0)
         {
@@ -192,7 +190,7 @@ public sealed class SipTlsServer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Main accept loop that listens for and accepts incoming connections.
+    /// Accepts connections only after acquiring a bounded admission slot.
     /// </summary>
     private async Task AcceptLoopAsync(Socket listener, CancellationToken cancellationToken)
     {
@@ -200,7 +198,6 @@ public sealed class SipTlsServer : IAsyncDisposable
         {
             try
             {
-                // Wait for an available connection slot
                 await _connectionSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
                 Socket socket;
                 try
@@ -213,12 +210,11 @@ public sealed class SipTlsServer : IAsyncDisposable
                     throw;
                 }
 
-                // Start handling the connection
                 long connectionId = Interlocked.Increment(ref _nextConnectionId);
                 Task connection = HandleConnectionAsync(connectionId, socket, cancellationToken);
                 _ = _connections.TryAdd(connectionId, connection);
 
-                // Schedule cleanup when connection completes
+                // Execute synchronously when possible so slots are returned promptly.
                 _ = connection.ContinueWith(
                     static (_, state) =>
                     {
@@ -260,8 +256,7 @@ public sealed class SipTlsServer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Handles a single TLS connection through its full lifecycle:
-    /// TLS handshake, message reading/dispatching, and cleanup.
+    /// Owns the socket, negotiates TLS, and runs the framed message loop.
     /// </summary>
     /// <param name="connectionId">Unique identifier for this connection.</param>
     /// <param name="socket">The accepted TCP socket.</param>
@@ -348,8 +343,7 @@ public sealed class SipTlsServer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Processes incoming SIP messages from an authenticated connection.
-    /// Frames, parses, and dispatches each message to the handler.
+    /// Frames, parses, and dispatches messages from a TLS-protected connection.
     /// </summary>
     /// <param name="remoteEndPoint">The remote endpoint of the connection.</param>
     /// <param name="reader">Pipeline reader for incoming data.</param>
@@ -443,9 +437,14 @@ public sealed class SipTlsServer : IAsyncDisposable
     /// <param name="context">The request context.</param>
     /// <param name="response">The response writer.</param>
     /// <param name="handlerCancellation">Cancellation source for handler timeout.</param>
-    /// <param name="connectionLimitReached">True if connection limit is reached.</param>
+    /// <param name="connectionLimitReached">
+    /// Whether this message exceeded the per-connection message-count limit.
+    /// </param>
     /// <param name="serverCancellationToken">Server shutdown token.</param>
-    /// <returns>True if the connection should remain open; false if it should close.</returns>
+    /// <returns>
+    /// <see langword="true"/> if the connection may read another message; otherwise,
+    /// <see langword="false"/>.
+    /// </returns>
     private async ValueTask<bool> DispatchAsync(
         ReadOnlySequence<byte> framedMessage,
         SipRequestContext context,
@@ -456,7 +455,7 @@ public sealed class SipTlsServer : IAsyncDisposable
     {
         byte[]? rented = null;
         ReadOnlyMemory<byte> messageMemory;
-        // Flatten multi-segment messages into a contiguous buffer
+        // Borrow single-segment memory; flatten segmented frames into a temporary pooled array.
         if (framedMessage.IsSingleSegment)
         {
             messageMemory = framedMessage.First;
@@ -541,7 +540,7 @@ public sealed class SipTlsServer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Parses a message and extracts metadata for dispatch.
+    /// Parses a contiguous frame and retains only offsets needed to recreate its borrowed view.
     /// </summary>
     private bool TryParseForDispatch(ReadOnlyMemory<byte> memory, out SipMessageMetadata metadata)
     {
@@ -556,7 +555,7 @@ public sealed class SipTlsServer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Captures cleanup state for a connection when it completes.
+    /// Captures state for the allocation-conscious task continuation.
     /// </summary>
     private sealed record ConnectionCleanup(
         long Id,

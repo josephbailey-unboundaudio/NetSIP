@@ -16,6 +16,7 @@ byte[] request = Encoding.ASCII.GetBytes(
 SipServerLimits limits = new();
 
 int checksum = Run(request, limits, warmupIterations);
+// Exclude JIT and prior garbage from the thread-local steady-state measurement.
 GC.Collect();
 GC.WaitForPendingFinalizers();
 GC.Collect();

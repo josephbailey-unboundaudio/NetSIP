@@ -5,37 +5,37 @@ public sealed class SipServerLimits
 {
     /// <summary>
     /// Gets or initializes the maximum size in bytes of the start line (request line or status line).
-    /// Default is 2KB.
+    /// The default is 2 KiB.
     /// </summary>
     public int MaxStartLineBytes { get; init; } = 2 * 1024;
 
     /// <summary>
     /// Gets or initializes the maximum size in bytes of a single header line.
-    /// Default is 8KB.
+    /// The default is 8 KiB.
     /// </summary>
     public int MaxHeaderLineBytes { get; init; } = 8 * 1024;
 
     /// <summary>
-    /// Gets or initializes the maximum total size in bytes of all headers including the start line.
-    /// Default is 64KB.
+    /// Gets or initializes the maximum combined size of the start line, header fields,
+    /// and terminating CRLF sequence. The default is 64 KiB.
     /// </summary>
     public int MaxHeaderBytes { get; init; } = 64 * 1024;
 
     /// <summary>
     /// Gets or initializes the maximum number of header lines allowed in a message.
-    /// Default is 128.
+    /// The default is 128.
     /// </summary>
     public int MaxHeaderCount { get; init; } = 128;
 
     /// <summary>
     /// Gets or initializes the maximum size in bytes of the message body.
-    /// Default is 1MB.
+    /// The default is 1 MiB. Zero permits only bodyless messages.
     /// </summary>
     public int MaxBodyBytes { get; init; } = 1024 * 1024;
 
     /// <summary>
     /// Gets or initializes the maximum number of SIP messages allowed on a single connection.
-    /// Default is 10,000.
+    /// The default is 10,000.
     /// </summary>
     public int MaxMessagesPerConnection { get; init; } = 10_000;
 
@@ -53,7 +53,7 @@ public sealed class SipServerLimits
         ArgumentOutOfRangeException.ThrowIfNegative(MaxBodyBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxMessagesPerConnection);
 
-        // Ensure individual line limits don't exceed total header limit
+        // A per-line limit cannot be satisfiable when it exceeds the aggregate limit.
         if (MaxStartLineBytes > MaxHeaderBytes || MaxHeaderLineBytes > MaxHeaderBytes)
         {
             throw new ArgumentException("Start-line and header-line limits cannot exceed MaxHeaderBytes.");

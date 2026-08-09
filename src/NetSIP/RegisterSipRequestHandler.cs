@@ -36,7 +36,7 @@ public sealed class SipRegisterHandlerOptions
     public int MaxCallIdsPerAddress { get; init; } = 64;
 
     /// <summary>
-    /// Gets or initializes the maximum size in bytes of a Contact URI.
+    /// Gets or initializes the maximum size of one complete Contact field value.
     /// </summary>
     public int MaxContactBytes { get; init; } = 2048;
 
@@ -51,7 +51,7 @@ public sealed class SipRegisterHandlerOptions
     public int MaxCallIdBytes { get; init; } = 256;
 
     /// <summary>
-    /// Gets or initializes the maximum total bytes that can be stored in memory.
+    /// Gets or initializes the maximum estimated memory attributed to registrar state.
     /// </summary>
     public long MaxStoredBytes { get; init; } = 16 * 1024 * 1024;
 
@@ -87,23 +87,23 @@ public sealed class SipRegisterHandlerOptions
 public sealed class RegisterSipRequestHandler : ISipRequestHandler
 {
     /// <summary>
-    /// Lock for protecting access to the registration store.
+    /// Serializes transactional updates to all registrar state and accounting.
     /// </summary>
     private readonly Lock _gate = new();
 
     /// <summary>
-    /// Dictionary storing bindings by address of record.
+    /// Registrar state keyed by canonical address of record.
     /// </summary>
     private readonly Dictionary<string, AddressBindings> _addresses =
         [with(StringComparer.Ordinal)];
 
     /// <summary>
-    /// Configuration options for the handler.
+    /// Validated handler policy and resource limits.
     /// </summary>
     private readonly SipRegisterHandlerOptions _options;
 
     /// <summary>
-    /// Time provider for calculating expiration times.
+    /// Clock used for binding and replay-order expiration.
     /// </summary>
     private readonly TimeProvider _timeProvider;
 
@@ -127,11 +127,11 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
     }
 
     /// <summary>
-    /// Handles a SIP REGISTER request.
+    /// Handles REGISTER synchronously and rejects other methods with 501.
     /// </summary>
     /// <param name="context">The request context.</param>
     /// <param name="cancellationToken">Cancellation token for the operation.</param>
-    /// <returns>A completed task.</returns>
+    /// <returns>A completed operation after the response has been buffered.</returns>
     public ValueTask HandleAsync(SipRequestContext context, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -140,18 +140,16 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
     }
 
     /// <summary>
-    /// Core handler logic that processes the REGISTER request and writes the appropriate response.
+    /// Parses, applies, and serializes one REGISTER transaction.
     /// </summary>
     internal void Handle(SipRequestContext context, SipMessageView message)
     {
-        // Only handle REGISTER method
         if (!Ascii.EqualsIgnoreCase(message.Method, "REGISTER"u8))
         {
             WriteFailure(context, message, 501, "Not Implemented"u8);
             return;
         }
 
-        // Parse the request
         ParseResult parseResult = TryParseRequest(message, out RegisterRequest request);
         if (parseResult == ParseResult.Malformed)
         {
@@ -159,7 +157,6 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
             return;
         }
 
-        // Check for interval too brief
         if (parseResult == ParseResult.IntervalTooBrief)
         {
             if (!context.Response.WriteRegisterIntervalTooBrief(
@@ -172,7 +169,6 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
             return;
         }
 
-        // Apply the registration operation
         ProcessResult processResult = Apply(request, out SipRegistrationBinding[] bindings);
         if (processResult == ProcessResult.StaleSequence)
         {
@@ -186,7 +182,6 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
             return;
         }
 
-        // Write successful response with current bindings
         if (!context.Response.WriteRegisterOk(message, bindings))
         {
             context.Response.WriteError(400);
@@ -207,11 +202,9 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         long now = _timeProvider.GetUtcNow().UtcTicks;
         lock (_gate)
         {
-            // Check for existing address-of-record
             _ = _addresses.TryGetValue(request.AddressOfRecord, out AddressBindings? address);
             if (address is not null)
             {
-                // Clean up expired bindings and sequences
                 long beforeCleanup = EstimateAddressBytes(request.AddressOfRecord, address);
                 RemoveExpired(address, now);
                 if (address.Bindings.Count == 0 && address.Sequences.Count == 0)
@@ -228,7 +221,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 }
             }
 
-            // Validate CSeq ordering for the Call-ID
+            // Equal CSeq is idempotent; a lower value is stale for this Call-ID.
             if (address is not null &&
                 address.Sequences.TryGetValue(
                     request.CallId,
@@ -253,7 +246,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 return ProcessResult.CapacityExceeded;
             }
 
-            // Clone existing bindings and sequences for update
+            // Mutate clones so a capacity failure cannot partially update live state.
             Dictionary<string, StoredBinding> updatedBindings = address is null
                 ? [with(StringComparer.Ordinal)]
                 : new Dictionary<string, StoredBinding>(
@@ -265,7 +258,6 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                     address.Sequences,
                     StringComparer.Ordinal);
 
-            // Apply registration changes
             if (request.Wildcard)
             {
                 updatedBindings.Clear();
@@ -287,7 +279,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 }
             }
 
-            // Return early if no state remains
+            // Do not create state for a no-op query or removal of an unknown address.
             bool createsState = updatedBindings.Count > 0 || address is not null;
             if (!createsState)
             {
@@ -295,7 +287,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 return ProcessResult.Success;
             }
 
-            // Update sequence tracking
+            // Retain ordering state long enough to cover the maximum binding lifetime.
             updatedSequences[request.CallId] = new StoredSequence(
                 request.CSeq,
                 checked(now + (_options.MaximumExpirationSeconds * TimeSpan.TicksPerSecond)));
@@ -306,7 +298,6 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 return ProcessResult.CapacityExceeded;
             }
 
-            // Enforce address-of-record limit
             if (address is null && _addresses.Count >= _options.MaxAddressesOfRecord)
             {
                 ReclaimExpiredAddresses(now);
@@ -317,7 +308,6 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 }
             }
 
-            // Enforce byte limit
             AddressBindings updatedAddress = new()
             {
                 Bindings = updatedBindings,
@@ -341,7 +331,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
                 }
             }
 
-            // Commit the update
+            // Publish both dictionaries and accounting as one locked transaction.
             _addresses[request.AddressOfRecord] = updatedAddress;
             _storedBytes = projectedBytes;
             bindings = Snapshot(updatedAddress, now);
@@ -1334,7 +1324,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
     }
 
     /// <summary>
-    /// Estimates the memory footprint of an address-of-record and its bindings.
+    /// Conservatively estimates attributed managed memory for capacity enforcement.
     /// </summary>
     private static long EstimateAddressBytes(
         string addressOfRecord,
@@ -1355,7 +1345,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
     }
 
     /// <summary>
-    /// Estimates the memory footprint of a string in the CLR.
+    /// Estimates UTF-16 payload plus a fixed allowance for object/table overhead.
     /// </summary>
     private static long EstimateStringBytes(string value)
     {
@@ -1379,7 +1369,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         foreach (StoredBinding stored in address.Bindings.Values)
         {
             long remainingTicks = Math.Max(0, stored.ExpirationTicks - now);
-            // Round up to the nearest second
+            // Never advertise zero seconds while a sub-second remainder is still live.
             int remainingSeconds = checked((int)Math.Min(
                 int.MaxValue,
                 (remainingTicks + TimeSpan.TicksPerSecond - 1) /
@@ -1413,30 +1403,30 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
     private sealed class AddressBindings
     {
         /// <summary>
-        /// Gets or sets the active bindings keyed by contact identifier.
+        /// Gets or sets active bindings keyed by canonical Contact identity.
         /// </summary>
         public Dictionary<string, StoredBinding> Bindings { get; set; } =
             [with(StringComparer.Ordinal)];
 
         /// <summary>
-        /// Gets or sets the CSeq tracking for each Call-ID.
+        /// Gets or sets replay-order state keyed by Call-ID.
         /// </summary>
         public Dictionary<string, StoredSequence> Sequences { get; set; } =
             [with(StringComparer.Ordinal)];
     }
 
     /// <summary>
-    /// Represents a stored contact binding with expiration.
+    /// Owns a serialized Contact value and its absolute UTC expiration.
     /// </summary>
     private sealed record StoredBinding(byte[] Contact, long ExpirationTicks);
 
     /// <summary>
-    /// Represents stored CSeq state for a Call-ID.
+    /// Retains the highest accepted CSeq for a Call-ID until its safety window expires.
     /// </summary>
     private sealed record StoredSequence(int CSeq, long RetainUntilTicks);
 
     /// <summary>
-    /// Represents a change to a registration binding.
+    /// Describes one parsed Contact add, refresh, or removal.
     /// </summary>
     private readonly record struct RegistrationChange(
         string Key,
@@ -1444,7 +1434,7 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         int ExpirationSeconds);
 
     /// <summary>
-    /// Represents a parsed REGISTER request.
+    /// Owns the validated data needed after borrowed message parsing completes.
     /// </summary>
     private readonly record struct RegisterRequest(
         string AddressOfRecord,
@@ -1454,13 +1444,13 @@ public sealed class RegisterSipRequestHandler : ISipRequestHandler
         bool Wildcard);
 
     /// <summary>
-    /// Context for parsing SIP URIs.
+    /// Selects URI rules that differ between To and Contact fields.
     /// </summary>
     private enum SipUriContext
     {
-        /// <summary>URI in To header.</summary>
+        /// <summary>An address-of-record URI from To.</summary>
         To,
-        /// <summary>URI in Contact header.</summary>
+        /// <summary>A binding URI from Contact.</summary>
         Contact
     }
 

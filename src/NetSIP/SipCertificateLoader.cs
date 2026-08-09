@@ -52,7 +52,7 @@ public static class SipCertificateLoader
         bool hasPemCertificate = !string.IsNullOrWhiteSpace(options.PemCertificatePath);
         bool hasPemKey = !string.IsNullOrWhiteSpace(options.PemPrivateKeyPath);
 
-        // Validate that exactly one certificate source is configured
+        // A PEM certificate and key form one source; PFX is the other.
         if (hasPfx == hasPemCertificate || hasPemCertificate != hasPemKey)
         {
             throw new ArgumentException(
@@ -63,7 +63,6 @@ public static class SipCertificateLoader
         X509Certificate2 certificate;
         if (hasPfx)
         {
-            // Load PFX certificate
             certificate = X509CertificateLoader.LoadPkcs12FromFile(
                 Path.GetFullPath(options.PfxPath!),
                 options.PfxPassword,
@@ -71,7 +70,6 @@ public static class SipCertificateLoader
         }
         else
         {
-            // Load PEM certificate and private key
             X509Certificate2 pemCertificate = string.IsNullOrEmpty(options.PemPrivateKeyPassword)
                 ? X509Certificate2.CreateFromPemFile(
                     Path.GetFullPath(options.PemCertificatePath!),
@@ -81,7 +79,7 @@ public static class SipCertificateLoader
                     options.PemPrivateKeyPassword,
                     Path.GetFullPath(options.PemPrivateKeyPath!));
 
-            // On Windows, convert to PKCS#12 for better compatibility
+            // Re-import on Windows so the private key uses a stable user key container.
             if (OperatingSystem.IsWindows())
             {
                 using (pemCertificate)
@@ -98,7 +96,7 @@ public static class SipCertificateLoader
             }
         }
 
-        // Validate that the certificate has a private key
+        // CreateFromPemFile can return a certificate without a usable matching key.
         if (!certificate.HasPrivateKey)
         {
             certificate.Dispose();
