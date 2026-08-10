@@ -1,5 +1,8 @@
 using Microsoft.Extensions.Logging;
-using NetSIP;
+using NetSIP.Audio;
+using NetSIP.Authentication;
+using NetSIP.Request;
+using NetSIP.Server;
 using System.Net;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;

@@ -1,4 +1,10 @@
-using NetSIP;
+using NetSIP.Audio;
+using NetSIP.Authentication;
+using NetSIP.Message;
+using NetSIP.Parser;
+using NetSIP.Registration;
+using NetSIP.Request;
+using NetSIP.Server;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Net;

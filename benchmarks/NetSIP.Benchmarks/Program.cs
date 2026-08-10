@@ -1,9 +1,11 @@
-using NetSIP;
+using NetSIP.Message;
+using NetSIP.Parser;
+using NetSIP.Server;
 using System.Diagnostics;
 using System.Text;
 
 const int warmupIterations = 100_000;
-const int measuredIterations = 1_000_000;
+const int measuredIterations = 5_000_000;
 
 byte[] request = Encoding.ASCII.GetBytes(
     "OPTIONS sip:service@example.com SIP/2.0\r\n" +

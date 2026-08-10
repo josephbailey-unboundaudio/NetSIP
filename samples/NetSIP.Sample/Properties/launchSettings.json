@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "NetSIP.Sample": {
+      "commandName": "Project",
+      "commandLineArgs": "--pfx .\\server.pfx --port 5061",
+      "environmentVariables": {
+        "NETSIP_PFX_PASSWORD": "changeit"
+      }
+    }
+  }
+}
